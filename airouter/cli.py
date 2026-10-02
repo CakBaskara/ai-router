@@ -5,9 +5,9 @@ import sys
 import time
 from datetime import datetime
 
-from . import chat, config, dispatch, learn
+from . import chat, config, dispatch, learn, rules
 from .classify import TIERS, classify
-from .journal import log, say
+from .journal import log, say, usage_today
 
 
 def _parse(argv):
@@ -15,7 +15,7 @@ def _parse(argv):
     p.add_argument("prompt", nargs="*", help="prompt text; read from stdin when omitted")
     p.add_argument("-i", "--interactive", action="store_true", help="open an interactive session in the current folder")
     p.add_argument("-t", "--tier", choices=TIERS, help="force a tier")
-    p.add_argument("-p", "--provider", choices=["claude", "codex"], help="force a provider")
+    p.add_argument("-p", "--provider", choices=["gemini", "copilot", "claude", "codex"], help="force a provider")
     p.add_argument("-n", "--dry-run", action="store_true", help="show the route without running it")
     p.add_argument("--no-llm", action="store_true", help="never ask a model to classify")
     p.add_argument("--plain", action="store_true", help="chat as plain text lines instead of the full-screen app")
@@ -28,6 +28,7 @@ def main(argv=None) -> int:
         stream.reconfigure(encoding="utf-8")
     args = _parse(argv if argv is not None else sys.argv[1:])
     cfg = config.load()
+    rules.sync()
 
     if args.ml:
         print(json.dumps(learn.Learner.load().report(cfg["classifier"].get("ml_target_accuracy", 0.9)), indent=2))
@@ -59,7 +60,7 @@ def main(argv=None) -> int:
                 tier = guess
                 reasons = reasons + [why]
 
-    providers = [args.provider] if args.provider else list(cfg["providers"])
+    providers = [args.provider] if args.provider else chat.lineup(cfg, tier, usage=usage_today())
     if args.interactive:
         providers = providers[:1]
 
@@ -71,7 +72,7 @@ def main(argv=None) -> int:
         cmd, stdin_text = dispatch.build(provider, route["model"], route["effort"], prompt, args.interactive)
         if args.dry_run:
             return 0
-        code, used = dispatch.run(cmd, stdin_text, quiet_stderr=provider == "codex"), (provider, route)
+        code, used = dispatch.run(cmd, stdin_text, quiet_stderr=provider != "claude"), (provider, route)
         if code == 0 or i == len(providers) - 1:
             break
         say(f"· {provider} gagal (exit {code}), pindah ke {providers[i + 1]}")

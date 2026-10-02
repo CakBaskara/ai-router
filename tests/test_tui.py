@@ -6,7 +6,7 @@ from airouter import config
 from airouter.chat import Chat
 from airouter.tui import ChatApp, Composer, ModelPicker, Reply, UserBubble
 
-CFG = config.load()
+CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing")}, "providers": ["claude", "codex"]}
 
 EVENTS = [
     {"type": "system", "subtype": "init", "session_id": "s1"},

@@ -2,7 +2,7 @@ from airouter import config, learn
 from airouter.chat import Chat
 from airouter.learn import Learner
 
-CFG = {k: v for k, v in config.load().items() if k != "chat"}
+CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing")}, "providers": ["claude", "codex"]}
 
 
 def rows(*pairs, source="seed"):

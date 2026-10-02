@@ -13,6 +13,7 @@ RULES = config.load()["rules"]
     ("tambah test untuk PERIOD_API", "medium"),
     ("kenapa mic ISO kehilangan frame tiap 160 detik? cari root cause", "heavy"),
     ("rancang arsitektur router multi-model dengan fallback", "heavy"),
+    ("rancang arsitektur cache yang tahan restart, cukup 3 poin singkat", "heavy"),
 ])
 def test_tier(prompt, tier):
     assert classify(prompt, RULES).tier == tier
@@ -39,7 +40,7 @@ def test_config_with_bom_loads(tmp_path, monkeypatch):
     path = tmp_path / "config.toml"
     path.write_bytes(b"\xef\xbb\xbf" + config.PACKAGE_CONFIG.read_bytes())
     monkeypatch.setenv("AI_ROUTER_CONFIG", str(path))
-    assert config.load()["providers"] == ["claude", "codex"]
+    assert "claude" in config.load()["providers"]
 
 
 def test_keyword_needs_word_start():

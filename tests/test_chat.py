@@ -1,7 +1,7 @@
 from airouter import config, dispatch
 from airouter.chat import CHAT_NOTE, Chat, ClaudeTurn, CodexTurn, recap
 
-CFG = {k: v for k, v in config.load().items() if k != "chat"}
+CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing")}, "providers": ["claude", "codex"]}
 
 
 def fake_runner(replies):

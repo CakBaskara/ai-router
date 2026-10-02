@@ -233,7 +233,7 @@ class ModelPicker(ModalScreen):
     def compose(self) -> ComposeResult:
         options = [Option(Text.assemble(("● " if self.auto else "  "), ("Otomatis", "bold"),
                                         ("  router memilih per pesan", "dim")), id="auto")]
-        for provider in ("claude", "codex"):
+        for provider in dict.fromkeys(p for p, _ in self.catalog):
             options.append(Option(Text(provider.capitalize(), style="bold dim"), disabled=True))
             for i, (p, model) in enumerate(self.catalog):
                 if p == provider:

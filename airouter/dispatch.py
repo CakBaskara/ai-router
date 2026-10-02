@@ -27,14 +27,37 @@ def claude_cmd() -> list[str]:
     return [shutil.which("claude") or "claude"]
 
 
-def codex_cmd() -> list[str]:
-    d = _shim_dir("codex")
+def _node_script(name: str, *rel: str) -> list[str]:
+    d = _shim_dir(name)
     if d:
-        js = d / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+        js = d.joinpath("node_modules", *rel)
         node = d / "node.exe"
         if js.exists():
             return [str(node) if node.exists() else (shutil.which("node") or "node"), str(js)]
-    return [shutil.which("codex") or "codex"]
+    return [shutil.which(name) or name]
+
+
+def codex_cmd() -> list[str]:
+    return _node_script("codex", "@openai", "codex", "bin", "codex.js")
+
+
+def gemini_cmd() -> list[str]:
+    return _node_script("gemini", "@google", "gemini-cli", "bundle", "gemini.js")
+
+
+def copilot_cmd() -> list[str]:
+    return _node_script("copilot", "@github", "copilot", "npm-loader.js")
+
+
+COPILOT_DENY = [
+    "shell(git push)", "shell(git commit)", "shell(git reset)", "shell(git clean)", "shell(git checkout)",
+    "shell(gh repo)", "shell(gh pr)", "shell(npm publish)", "shell(rm)", "shell(rmdir)", "shell(del)",
+    "shell(rd)", "shell(Remove-Item)", "shell(format)",
+]
+
+
+def _deny(rules: list[str]) -> list[str]:
+    return [arg for rule in rules for arg in ("--deny-tool", rule)]
 
 
 def build(provider: str, model: str, effort: str, prompt: str, interactive: bool) -> tuple[list[str], str | None]:
@@ -49,6 +72,15 @@ def build(provider: str, model: str, effort: str, prompt: str, interactive: bool
             return codex_cmd() + ["-m", model] + effort_cfg + ([prompt] if prompt else []), None
         return codex_cmd() + ["exec", "-m", model] + effort_cfg + [
             "--skip-git-repo-check", "--ephemeral", "-s", "read-only", "-"], prompt
+    if provider == "gemini":
+        if interactive:
+            return gemini_cmd() + ["-m", model] + (["-i", prompt] if prompt else []), None
+        return gemini_cmd() + ["-p", " ", "-m", model, "--approval-mode", "plan", "--skip-trust"], prompt
+    if provider == "copilot":
+        base = copilot_cmd() + ["--model", model, "--reasoning-effort", effort]
+        if interactive:
+            return base + (["-i", prompt] if prompt else []), None
+        return base + ["-s", "--allow-all-tools", "--no-ask-user"] + _deny(["shell", "write"]), prompt
     raise ValueError(f"unknown provider: {provider}")
 
 
@@ -64,6 +96,14 @@ def chat_cmd(provider: str, model: str, effort: str, session: str | None) -> lis
         if session:
             return codex_cmd() + ["exec", "resume"] + common + ["-c", 'sandbox_mode="workspace-write"', session, "-"]
         return codex_cmd() + ["exec"] + common + ["-s", "workspace-write", "-"]
+    if provider == "gemini":
+        cmd = gemini_cmd() + ["-p", " ", "-m", model, "-o", "stream-json", "--approval-mode", "auto_edit",
+                              "--skip-trust"]
+        return cmd + (["--resume", session] if session else [])
+    if provider == "copilot":
+        cmd = copilot_cmd() + ["--model", model, "--reasoning-effort", effort, "--output-format", "json",
+                               "--allow-all-tools", "--no-ask-user"] + _deny(COPILOT_DENY)
+        return cmd + (["--session-id", session] if session else [])
     raise ValueError(f"unknown provider: {provider}")
 
 

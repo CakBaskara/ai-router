@@ -1,12 +1,21 @@
 # ai-router
 
 One terminal command that sends each prompt to the cheapest model that can answer it,
-using the Claude Pro and ChatGPT Plus subscriptions through their official CLIs
-(`claude`, `codex`). No API keys.
+through the official CLIs of four providers: Gemini and GitHub Copilot (free tiers) for light
+work, Claude Code and Codex (Claude Pro, ChatGPT Plus) for heavy work.
 
 ## Install
 
-Needs Python 3.11+, and the `claude` and `codex` CLIs installed and logged in.
+Needs Python 3.11+ and any of these CLIs, installed and logged in:
+
+| Provider | Install | Login |
+|---|---|---|
+| Claude Code | `npm i -g @anthropic-ai/claude-code` | `claude`, then sign in |
+| Codex | `npm i -g @openai/codex` | `codex login` |
+| Gemini | `npm i -g @google/gemini-cli` | API key from aistudio.google.com/apikey in `GEMINI_API_KEY`; Google sign-in no longer works for the CLI's free tier |
+| Copilot | `npm i -g @github/copilot` | `copilot login` (or an existing `gh` login) |
+
+Remove a provider you do not use from `providers` in `airouter/config.toml`.
 
 ```powershell
 git clone https://github.com/CakBaskara/ai-router
@@ -27,7 +36,7 @@ This puts `ai` (`ai.exe` on Windows) in the Python `Scripts` folder.
 | `ai -i "tambah test untuk PERIOD_API"` | Opens an interactive Claude Code session in the current folder with the chosen model |
 | `ai -i` | Interactive session, medium tier |
 | `ai -t heavy "..."` | Force a tier: `light`, `medium`, `heavy` |
-| `ai -p codex "..."` | Force a provider: `claude`, `codex` |
+| `ai -p codex "..."` | Force a provider: `gemini`, `copilot`, `claude`, `codex` |
 | `ai -n "..."` | Dry run: show the route, run nothing |
 | `ai --no-llm "..."` | Never ask a model to classify |
 
@@ -41,12 +50,12 @@ prompt
   │
   ├─ no keyword matched → ask Haiku for one word (≈1.7k tokens, ≈5 s)
   │
-  ├─ tier → model, from config.toml
-  │     light  → claude haiku  (low)    · codex gpt-5.6-luna  (low)
-  │     medium → claude sonnet (medium) · codex gpt-5.6-terra (medium)
-  │     heavy  → claude opus   (high)   · codex gpt-6-astra   (high)
+  ├─ tier → providers, from config.toml
+  │     light, medium → gemini, copilot first (free), then claude, codex
+  │     heavy         → claude opus / codex gpt-6.1-sol first, free ones last
+  │     the paid pair takes turns: the one used less today goes first
   │
-  └─ providers tried in order (claude, codex); a non-zero exit moves to the next.
+  └─ a failure or exhausted quota moves to the next provider.
      Interactive sessions use the first provider only.
 ```
 
@@ -60,11 +69,11 @@ gives the line-by-line version. Each message goes through the same rules, with t
 
 | Rule | Why |
 |---|---|
-| Chat never goes below `[chat] min_tier` (set to heavy: Opus, high effort) | Lower tiers answered chat curtly; set it to `medium` to save quota |
+| Chat never goes below `[chat] min_tier` (light) | Raise it to `heavy` to send every message to Opus or gpt-6.1-sol |
 | The first message to each provider session starts with a short note about the router | Without it the model says it cannot switch models and does not know `/models` |
 | The tier only goes up within a conversation; `/new` resets it | A model switch rewrites the whole context into cache, so dropping back for a short follow-up costs more than staying |
 | Haiku is asked only for the first message; later ones use the local classifier alone | Follow-ups like "lanjut" carry no keywords and keep the current tier |
-| The provider sticks after a fallback | Switching back and forth would resend the recap each time |
+| The provider sticks within a conversation, except that a heavy message leaves a free provider | Switching back and forth would resend the recap each time |
 
 Claude runs as one long-lived process per model (`--input-format stream-json`), started
 before the first message, so a turn does not pay Claude Code's startup each time. Codex has no
@@ -75,6 +84,19 @@ first as a short recap (last 12 entries, 2000 characters each).
 Edits and shell commands run without asking. Claude runs with `--permission-mode auto`, the
 same mode as an interactive Claude Code session in auto mode: a safety classifier still blocks
 risky actions. Codex runs with `-s workspace-write`, so its commands stay inside the folder.
+Copilot runs every tool except a deny list (git push/commit/reset/clean/checkout, `gh repo`,
+`gh pr`, `npm publish`, and file deletion); its `--assisted-approval` judge refuses even safe
+commands when nobody can answer, so it is not used. Gemini runs with `--approval-mode auto_edit`:
+it edits files but cannot run shell commands, because its `tools.exclude` command filter did not
+block anything in yolo mode when tested.
+
+All four read the same rules. `ai` copies `~/.claude/CLAUDE.md` to `~/.gemini/GEMINI.md` and
+`~/.copilot/copilot-instructions.md` on every start, so edit only the first. Codex keeps its own
+`~/.codex/AGENTS.md`. In a repository, Copilot reads `CLAUDE.md`/`AGENTS.md`, and Gemini is set
+to read them too (`context.fileName` in `~/.gemini/settings.json`).
+
+Measured speed for a short answer: Claude about 2 s (long-lived process), Codex about 5 s,
+Copilot 8 to 37 s, Gemini 14 to 50 s. Free-first saves quota at the cost of waiting.
 
 The full-screen chat uses the VS Code Dark Modern palette. On Windows, Shift+Enter adds a line:
 Textual drops the Shift state of Enter, so the app reads it from the console event first. This

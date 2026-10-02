@@ -8,7 +8,7 @@ from datetime import datetime
 
 from . import dispatch, learn
 from .classify import TIERS, classify
-from .journal import log, say
+from .journal import log, say, usage_today
 
 HELP = (
     "/new                      percakapan baru\n"
@@ -17,14 +17,15 @@ HELP = (
     "/model auto               kembali ke routing otomatis\n"
     "/models                   daftar model yang bisa dipilih\n"
     "/model 3  /model sol      pilih model dari daftar (nomor atau nama)\n"
-    "/claude  /codex           kunci provider\n"
+    "/claude /codex /gemini /copilot  kunci provider\n"
     "/codex gpt-5.6-sol        kunci provider dan model persis\n"
     "/exit                    keluar\n"
     "Baris diakhiri \\ untuk lanjut ke baris berikutnya; teks yang di-paste ikut terkirim utuh."
 )
 CHAT_NOTE = (
     "[Context from the `ai` chat app, not from the user] You are answering inside `ai`, the user's terminal chat "
-    "that routes each message to Claude Code or Codex CLI and picks the model automatically. You cannot switch "
+    "that routes each message to Claude Code, Codex, Gemini or Copilot CLI and picks the model automatically. "
+    "Other assistants may have answered earlier turns; treat their answers as part of this conversation. You cannot switch "
     "models yourself. If the user wants another model, tell them to type /models for the list, /model <number or "
     "name> to pick one, or /model auto to go back to automatic routing; /new starts a new conversation. "
     "Answer naturally, like a helpful colleague, not curtly.\n\n"
@@ -62,6 +63,13 @@ def _k(n: int) -> str:
     return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
 
 
+def _tool(name: str, args: dict) -> str:
+    detail = str(next((args[k] for k in TOOL_KEYS if args.get(k)), ""))
+    if os.path.isabs(detail) and detail.lower().startswith(os.getcwd().lower()):
+        detail = os.path.relpath(detail)
+    return _short(f"{name} {detail}")
+
+
 class ClaudeTurn:
     def __init__(self):
         self.session = None
@@ -87,11 +95,7 @@ class ClaudeTurn:
         elif kind == "assistant":
             for block in ev.get("message", {}).get("content", []):
                 if block.get("type") == "tool_use":
-                    args = block.get("input", {})
-                    detail = str(next((args[k] for k in TOOL_KEYS if args.get(k)), ""))
-                    if os.path.isabs(detail) and detail.lower().startswith(os.getcwd().lower()):
-                        detail = os.path.relpath(detail)
-                    return "note", _short(f"{block.get('name')} {detail}")
+                    return "note", _tool(block.get("name"), block.get("input", {}))
         elif kind == "result":
             u = ev.get("usage", {})
             cached = u.get("cache_read_input_tokens", 0)
@@ -120,6 +124,10 @@ class CodexTurn:
             self.session = ev.get("thread_id")
         elif kind == "item.started" and itype == "command_execution":
             return "note", _short(f"$ {item.get('command', '')}")
+        elif kind == "item.started" and itype == "mcp_tool_call":
+            return "note", _tool(f"{item.get('server', '')}.{item.get('tool', '')}", item.get("arguments") or {})
+        elif kind == "item.started" and itype == "web_search":
+            return "note", _short(f"search {item.get('query', '')}")
         elif kind == "item.completed" and itype == "agent_message":
             prefix = "\n\n" if self.reply else ""
             self.reply.append(prefix + item.get("text", ""))
@@ -141,6 +149,99 @@ class CodexTurn:
 
     def text(self) -> str:
         return "".join(self.reply).strip()
+
+
+class GeminiTurn:
+    def __init__(self):
+        self.session = None
+        self.reply = []
+        self.usage = ""
+        self.error = None
+        self.after_tool = False
+
+    def feed(self, ev: dict):
+        kind = ev.get("type")
+        if kind == "init":
+            self.session = ev.get("session_id")
+        elif kind == "message" and ev.get("role") == "assistant":
+            text = ev.get("content", "")
+            if self.after_tool and self.reply:
+                text = "\n\n" + text
+            self.after_tool = False
+            self.reply.append(text)
+            return "text", text
+        elif kind == "tool_use":
+            self.after_tool = True
+            return "note", _tool(ev.get("tool_name", ""), ev.get("parameters") or {})
+        elif kind == "tool_result" and ev.get("status") != "success":
+            return "note", _short(f"gagal: {ev.get('error', {}).get('message') or ev.get('status')}", 200)
+        elif kind == "result":
+            s = ev.get("stats", {})
+            self.usage = (f"in {_k(s.get('input_tokens', 0))} (cache {_k(s.get('cached', 0))})"
+                          f" · out {_k(s.get('output_tokens', 0))}")
+            if ev.get("status") != "success":
+                self.error = _short((ev.get("error") or {}).get("message") or ev.get("status") or "error", 300)
+        elif kind == "error":
+            self.error = _short(ev.get("message") or "error", 300)
+        return None
+
+    def text(self) -> str:
+        return "".join(self.reply).strip()
+
+
+class CopilotTurn:
+    def __init__(self):
+        self.session = None
+        self.reply = []
+        self.usage = ""
+        self.error = None
+
+    def feed(self, ev: dict):
+        kind = ev.get("type")
+        data = ev.get("data", {})
+        if kind == "assistant.message_start" and self.reply:
+            self.reply.append("\n\n")
+            return "break", ""
+        if kind == "assistant.message_delta":
+            text = data.get("deltaContent", "")
+            self.reply.append(text)
+            return "text", text
+        if kind == "tool.execution_start":
+            return "note", _tool(data.get("toolName", ""), data.get("arguments") or {})
+        if kind == "tool.execution_complete" and not data.get("success"):
+            return "note", _short(f"gagal: {(data.get('error') or {}).get('message', '')}", 200)
+        if kind == "session.error":
+            self.error = _short(data.get("message") or "error", 300)
+        elif kind == "result":
+            self.session = ev.get("sessionId")
+            premium = ev.get("usage", {}).get("premiumRequests")
+            self.usage = f"premium request {premium}" if premium is not None else ""
+            if ev.get("exitCode"):
+                self.error = self.error or f"exit {ev['exitCode']}"
+        return None
+
+    def text(self) -> str:
+        return "".join(self.reply).strip()
+
+
+TURNS = {"claude": ClaudeTurn, "codex": CodexTurn, "gemini": GeminiTurn, "copilot": CopilotTurn}
+
+
+def lineup(cfg: dict, tier: str, sticky: str | None = None, usage: dict | None = None) -> list[str]:
+    routing = cfg.get("routing", {})
+    providers = list(cfg["providers"])
+    free = [p for p in providers if p in routing.get("free", [])]
+    paid = [p for p in providers if p not in free]
+    if usage:
+        paid.sort(key=lambda p: usage.get(p, 0))
+    free_first = tier in routing.get("free_tiers", [])
+    if sticky in paid:
+        paid.remove(sticky)
+        paid.insert(0, sticky)
+    elif sticky in free and free_first:
+        free.remove(sticky)
+        free.insert(0, sticky)
+    return free + paid if free_first else paid + free
 
 
 class Printer:
@@ -306,14 +407,10 @@ class Chat:
             tier = self.tier
         return tier, reasons, llm
 
-    def order(self) -> list[str]:
+    def order(self, tier: str) -> list[str]:
         if self.pinned_provider:
             return [self.pinned_provider]
-        providers = list(self.cfg["providers"])
-        if self.provider in providers:
-            providers.remove(self.provider)
-            providers.insert(0, self.provider)
-        return providers
+        return lineup(self.cfg, tier, self.provider, usage_today())
 
     def _started(self, proc):
         self._proc = proc
@@ -346,9 +443,9 @@ class Chat:
         return self._claude
 
     def prewarm(self):
-        if self.order()[0] != "claude":
-            return
         tier = self.pinned_tier or self.tier or self.cfg.get("chat", {}).get("min_tier") or "medium"
+        if self.order(tier)[0] != "claude":
+            return
         self._claude_proc(self.claude_route(tier))
 
     def _run(self, provider: str, route: dict, prompt: str, turn, runner) -> int:
@@ -365,7 +462,7 @@ class Chat:
     def send(self, msg: str, runner=None) -> int:
         self._cancelled = False
         tier, reasons, llm = self.route(msg)
-        providers = self.order()
+        providers = self.order(tier)
         code = 1
         for i, provider in enumerate(providers):
             route = dict(self.cfg["tiers"][tier][provider])
@@ -376,7 +473,7 @@ class Chat:
             prompt = recap(unseen) + msg if unseen else msg
             if provider not in self.sessions:
                 prompt = CHAT_NOTE + prompt
-            turn = ClaudeTurn() if provider == "claude" else CodexTurn()
+            turn = TURNS[provider]()
             started = time.time()
             code = self._run(provider, route, prompt, turn, runner)
             self._proc = None
@@ -433,8 +530,11 @@ class Chat:
     def catalog(self) -> list[tuple[str, str]]:
         if self._catalog is None:
             models = self.cfg.get("models", {})
-            codex = models.get("codex") or dispatch.codex_models()
-            self._catalog = [("claude", m) for m in models.get("claude", [])] + [("codex", m) for m in codex]
+            catalog = []
+            for provider in self.cfg["providers"]:
+                listed = models.get(provider) or (dispatch.codex_models() if provider == "codex" else [])
+                catalog += [(provider, m) for m in listed]
+            self._catalog = catalog
         return self._catalog
 
     def pin(self, provider: str, model: str | None):
@@ -461,7 +561,8 @@ class Chat:
         elif match:
             self.ui.info("lebih dari satu cocok: " + ", ".join(m for _, m in match))
         else:
-            self.ui.info(f"model '{arg}' tidak ada di /models; pakai /claude {arg} atau /codex {arg} untuk memaksa")
+            self.ui.info(f"model '{arg}' tidak ada di /models; pakai /<provider> {arg} untuk memaksa, "
+                         f"misalnya /codex {arg}")
 
     def status(self) -> str:
         return (f"tier {self.pinned_tier or self.tier or '-'}{' (dikunci)' if self.pinned_tier else ''}"
@@ -470,7 +571,7 @@ class Chat:
 
     def list_models(self):
         current = self.label()
-        rows = [f"{'*' if m == current else ' '} {i:>2}  {p:<6} {m}" for i, (p, m) in enumerate(self.catalog(), 1)]
+        rows = [f"{'*' if m == current else ' '} {i:>2}  {p:<7} {m}" for i, (p, m) in enumerate(self.catalog(), 1)]
         self.ui.info("\n".join(rows) + "\npilih: /model <nomor atau nama>")
 
     def command(self, line: str) -> bool:
@@ -494,7 +595,7 @@ class Chat:
             self.pick(arg)
         elif name == "/models":
             self.list_models()
-        elif name in ("/claude", "/codex"):
+        elif name[1:] in self.cfg["providers"]:
             self.pin(name[1:], arg or None)
         else:
             self.ui.info(HELP)

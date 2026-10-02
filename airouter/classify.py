@@ -50,7 +50,7 @@ def classify(prompt: str, rules: dict, repo: bool = False) -> Verdict:
     if medium:
         score += 1
         reasons.append("medium: " + ", ".join(medium))
-    if light:
+    if light and not heavy:
         score -= 1
         reasons.append("light: " + ", ".join(light))
 

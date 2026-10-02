@@ -1,4 +1,9 @@
-providers = ["claude", "codex"]
+providers = ["gemini", "copilot", "claude", "codex"]
+
+[routing]
+# Free providers go first for these tiers; heavy goes to the paid ones, which take turns by today's use.
+free = ["gemini", "copilot"]
+free_tiers = ["light", "medium"]
 
 [classifier]
 llm_fallback = true
@@ -8,23 +13,31 @@ ml_target_accuracy = 0.9
 ml_min_labels = 30
 
 [chat]
-min_tier = "heavy"
+min_tier = "light"
 
 # Shown by /models in chat. Codex models come from `codex debug models` unless listed here.
 [models]
+gemini = ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.1-pro-preview"]
+copilot = ["auto"]
 claude = ["haiku", "sonnet", "opus", "claude-fable-5-1"]
 
 [tiers.light]
+gemini = { model = "gemini-3.8-flash", effort = "low" }
+copilot = { model = "auto", effort = "low" }
 claude = { model = "haiku", effort = "low" }
 codex = { model = "gpt-5.6-luna", effort = "low" }
 
 [tiers.medium]
+gemini = { model = "gemini-3.8-flash", effort = "medium" }
+copilot = { model = "auto", effort = "medium" }
 claude = { model = "sonnet", effort = "medium" }
 codex = { model = "gpt-5.6-terra", effort = "medium" }
 
 [tiers.heavy]
+gemini = { model = "gemini-3.8-flash", effort = "high" }
+copilot = { model = "auto", effort = "high" }
 claude = { model = "opus", effort = "high" }
-codex = { model = "gpt-6-astra", effort = "high" }
+codex = { model = "gpt-6.1-sol", effort = "high" }
 
 [rules]
 heavy = [

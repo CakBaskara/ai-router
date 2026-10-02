@@ -105,6 +105,21 @@ there use Ctrl+J or a trailing `\`. Ctrl+A selects the input, or the whole conve
 the input is empty; Ctrl+C copies the selection. A prompt sent while an answer is still running
 is queued and goes out as soon as that answer ends.
 
+### Attachments
+
+| How | What happens |
+|---|---|
+| Alt+V | Attaches the image on the clipboard, or the files copied in Explorer. Windows Terminal and the VS Code terminal swallow Ctrl+V when the clipboard holds only an image, so Alt+V is the reliable key; Ctrl+V tries the clipboard first and falls back to pasting text |
+| Click 📎 right of the input | Opens the Windows file dialog; pick one or more files |
+| Drag a file onto the terminal | The pasted path becomes an attachment instead of text |
+| Backspace in an empty input | Removes the last attachment |
+
+Attachments are copied to `logs/attachments` (gitignored, 20 MB per file, BMP/TIFF converted to
+PNG) so every CLI is allowed to read them, then sent the way each CLI expects: Claude gets image
+blocks in its stream-json input, Codex `-i`, Copilot `--attachment` (images and PDF), Gemini an
+`@path` reference with `--include-directories`. Other file types are listed in the prompt for the
+model to open with its tools. One image with a number was read correctly by all four.
+
 | Command | Effect |
 |---|---|
 | `/new` | New conversation |

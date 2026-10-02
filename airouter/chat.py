@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import subprocess
@@ -5,8 +6,9 @@ import sys
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 
-from . import dispatch, learn
+from . import attach, dispatch, learn
 from .classify import TIERS, classify
 from .journal import log, say, usage_today
 
@@ -224,6 +226,25 @@ class CopilotTurn:
         return "".join(self.reply).strip()
 
 
+def with_files(provider: str, prompt: str, files) -> str:
+    if not files:
+        return prompt
+    if provider == "gemini":
+        return prompt + "\n\n" + " ".join("@" + str(f).replace("\\", "/") for f in files)
+    listed = "\n".join(f"- {f}" for f in files)
+    return f"{prompt}\n\nAttached files (read them with your tools if they are not shown inline):\n{listed}"
+
+
+def image_blocks(files) -> list[dict]:
+    blocks = []
+    for f in files:
+        if attach.is_image(f):
+            data = base64.b64encode(Path(f).read_bytes()).decode("ascii")
+            blocks.append({"type": "image", "source": {"type": "base64", "media_type": attach.media_type(f),
+                                                       "data": data}})
+    return blocks
+
+
 TURNS = {"claude": ClaudeTurn, "codex": CodexTurn, "gemini": GeminiTurn, "copilot": CopilotTurn}
 
 
@@ -324,7 +345,7 @@ class ClaudeProc:
     def __init__(self, model: str, effort: str, session: str | None):
         self.key = (model, effort)
         self.session = session
-        cmd = dispatch.chat_cmd("claude", model, effort, session)
+        cmd = dispatch.chat_cmd("claude", model, effort, session, attach_dir=str(attach.folder()))
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.errors = []
         threading.Thread(target=self._drain, daemon=True).start()
@@ -336,8 +357,9 @@ class ClaudeProc:
     def alive(self) -> bool:
         return self.proc.poll() is None
 
-    def ask(self, prompt: str, turn, show) -> int:
-        msg = {"type": "user", "message": {"role": "user", "content": prompt}}
+    def ask(self, prompt: str, turn, show, files=()) -> int:
+        content = [{"type": "text", "text": prompt}] + image_blocks(files)
+        msg = {"type": "user", "message": {"role": "user", "content": content}}
         try:
             self.proc.stdin.write((json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8"))
             self.proc.stdin.flush()
@@ -449,18 +471,17 @@ class Chat:
             return
         self._claude_proc(self.claude_route(tier))
 
-    def _run(self, provider: str, route: dict, prompt: str, turn, runner) -> int:
-        if runner:
-            cmd = dispatch.chat_cmd(provider, route["model"], route["effort"], self.sessions.get(provider))
-            return runner(cmd, prompt, turn, self.ui.show, self._started)
-        if provider != "claude":
-            cmd = dispatch.chat_cmd(provider, route["model"], route["effort"], self.sessions.get(provider))
-            return stream(cmd, prompt, turn, self.ui.show, self._started)
+    def _run(self, provider: str, route: dict, prompt: str, turn, runner, files=()) -> int:
+        prompt = with_files(provider, prompt, files)
+        if runner or provider != "claude":
+            cmd = dispatch.chat_cmd(provider, route["model"], route["effort"], self.sessions.get(provider),
+                                    files, str(attach.folder()) if files else None)
+            return (runner or stream)(cmd, prompt, turn, self.ui.show, self._started)
         p = self._claude_proc(route)
         self._started(p.proc)
-        return p.ask(prompt, turn, self.ui.show)
+        return p.ask(prompt, turn, self.ui.show, files)
 
-    def send(self, msg: str, runner=None) -> int:
+    def send(self, msg: str, runner=None, attachments=()) -> int:
         self._cancelled = False
         tier, reasons, llm = self.route(msg)
         providers = self.order(tier)
@@ -476,7 +497,7 @@ class Chat:
                 prompt = CHAT_NOTE + prompt
             turn = TURNS[provider]()
             started = time.time()
-            code = self._run(provider, route, prompt, turn, runner)
+            code = self._run(provider, route, prompt, turn, runner, attachments)
             self._proc = None
             if self._cancelled:
                 code = 130
@@ -489,7 +510,8 @@ class Chat:
                 if turn.session:
                     self.sessions[provider] = turn.session
                 reply = turn.text() + (" [dibatalkan]" if code == 130 else "")
-                self.transcript += [("User", msg), ("Assistant", reply)]
+                said = msg + (f"\n[lampiran: {', '.join(f.name for f in attachments)}]" if attachments else "")
+                self.transcript += [("User", said), ("Assistant", reply)]
                 self.synced[provider] = len(self.transcript)
                 self.provider, self.tier, self.model = provider, tier, route["model"]
                 if ok:

@@ -14,13 +14,13 @@ from textual.screen import ModalScreen
 from textual.theme import Theme
 from textual.widgets import Markdown, Static, TextArea, Tree
 
-from . import config
+from . import attach, config
 from .chat import HELP, Chat
 
 PICKER_ORDER = ("gemini", "copilot", "codex", "claude")
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 PACKAGE = Path(__file__).parent
-MODULES = ("config", "classify", "journal", "dispatch", "learn", "chat", "tui")
+MODULES = ("config", "classify", "journal", "attach", "dispatch", "learn", "chat", "tui")
 
 
 def _watched() -> list[Path]:
@@ -92,7 +92,11 @@ Info { color: #6E7681; text-style: italic; margin: 1 0 0 0; }
 #bottom { dock: bottom; height: auto; padding: 0 1 1 1; background: ansi_default; border-top: solid #2B2B2B; }
 #prompt { width: 2; color: #6E7681; background: ansi_default; }
 #inputrow { height: auto; background: ansi_default; }
-Composer { height: auto; min-height: 1; max-height: 10; background: ansi_default; color: #CCCCCC; border: none; padding: 0; }
+#clip { width: 4; padding: 0 1; color: #9D9D9D; background: ansi_default; }
+#clip:hover { background: #2B2B2B; }
+#files { height: auto; color: #9D9D9D; background: ansi_default; display: none; }
+#files.has { display: block; }
+Composer { width: 1fr; height: auto; min-height: 1; max-height: 10; background: ansi_default; color: #CCCCCC; border: none; padding: 0; }
 Composer:focus { border: none; }
 Composer .text-area--selection { background: #264F78; }
 ModelPicker { align: center middle; background: #000000 50%; }
@@ -181,6 +185,8 @@ class Composer(TextArea):
     BINDINGS = [
         Binding("ctrl+a", "select_everything", "Pilih semua", show=False),
         Binding("ctrl+c", "copy", "Salin", show=False),
+        Binding("alt+v", "paste_image", "Tempel gambar", show=False),
+        Binding("ctrl+v", "paste_any", "Tempel", show=False),
     ]
 
     class Submitted(Message):
@@ -200,8 +206,29 @@ class Composer(TextArea):
         else:
             self.screen.action_copy_text()
 
+    def action_paste_image(self):
+        self.app.attach_from_clipboard()
+
+    def action_paste_any(self):
+        if not self.app.attach_from_clipboard(quiet=True):
+            self.action_paste()
+
+    async def _on_paste(self, event):
+        files = attach.paths_in(event.text)
+        if files or not event.text.strip():
+            event.prevent_default()
+            event.stop()
+            if files:
+                self.app.attach_files(files)
+            else:
+                self.app.attach_from_clipboard()
+
     async def _on_key(self, event):
-        if event.key == "enter" and self.text.endswith("\\"):
+        if event.key == "backspace" and not self.text and self.app.attachments:
+            event.prevent_default()
+            event.stop()
+            self.app.drop_attachment()
+        elif event.key == "enter" and self.text.endswith("\\"):
             event.prevent_default()
             event.stop()
             self.text = self.text[:-1] + "\n"
@@ -219,6 +246,11 @@ class Composer(TextArea):
 class ModelChip(Static):
     def on_click(self):
         self.app.action_models()
+
+
+class AttachButton(Static):
+    def on_click(self):
+        self.app.pick_files()
 
 
 class ModelPicker(ModalScreen):
@@ -327,6 +359,8 @@ class ChatApp(App):
         self.reply = None
         self.busy = False
         self.queue = []
+        self.attachments = []
+        self.picking = False
         self.stamp = _stamp()
 
     def compose(self) -> ComposeResult:
@@ -336,9 +370,11 @@ class ChatApp(App):
             yield ModelChip("", id="model", markup=False)
         yield VerticalScroll(id="log")
         with Vertical(id="bottom"):
+            yield Static("", id="files", markup=False)
             with Horizontal(id="inputrow"):
                 yield Static("›", id="prompt")
                 yield Composer(id="input", placeholder="Tanya apa saja…", highlight_cursor_line=False)
+                yield AttachButton("📎", id="clip")
 
     def on_mount(self):
         self.register_theme(DARK_MODERN)
@@ -422,32 +458,85 @@ class ChatApp(App):
     @on(Composer.Submitted)
     def submitted(self, event: Composer.Submitted):
         text = event.text.strip()
-        if not text:
+        files = [] if text.startswith("/") else list(self.attachments)
+        if not text and not files:
             return
+        text = text or "Lihat lampiran."
         self.query_one(Composer).clear()
+        if files:
+            self.attachments = []
+            self.refresh_files()
         if self.busy:
-            bubble = None if text.startswith("/") else self._bubble(text, queued=True)
-            self.queue.append((text, bubble))
+            bubble = None if text.startswith("/") else self._bubble(text, files, queued=True)
+            self.queue.append((text, bubble, files))
             self.refresh_status()
             return
-        self.dispatch_input(text)
+        self.dispatch_input(text, None, files)
 
-    def _bubble(self, text: str, queued: bool = False) -> UserBubble:
-        bubble = UserBubble(text, markup=False, classes="queued" if queued else "")
+    def _bubble(self, text: str, files=(), queued: bool = False) -> UserBubble:
+        shown = text + ("\n" + attach.describe(files) if files else "")
+        bubble = UserBubble(shown, markup=False, classes="queued" if queued else "")
         self._mount(bubble)
         return bubble
 
-    def dispatch_input(self, text: str, bubble: UserBubble | None = None) -> bool:
+    def dispatch_input(self, text: str, bubble: UserBubble | None = None, files=()) -> bool:
         if text.startswith("/"):
             self.run_command(text)
             return False
         if bubble:
             bubble.remove_class("queued")
         else:
-            self._bubble(text)
+            self._bubble(text, files)
         self.busy = True
-        self.send(text)
+        self.send(text, list(files))
         return True
+
+    def attach_files(self, paths):
+        for path in paths:
+            try:
+                self.attachments.append(attach.store(path))
+            except (OSError, ValueError) as exc:
+                self.notify(f"Tidak bisa melampirkan {path.name}: {exc}", severity="warning")
+        self.refresh_files()
+
+    @work(thread=True)
+    def pick_files(self):
+        if self.picking:
+            return
+        self.picking = True
+        try:
+            paths = attach.pick_files()
+        except Exception as exc:
+            self.call_from_thread(self.notify, f"Dialog file gagal dibuka: {exc}", severity="warning")
+            return
+        finally:
+            self.picking = False
+        if paths:
+            self.call_from_thread(self.attach_files, paths)
+
+    def attach_from_clipboard(self, quiet: bool = False) -> bool:
+        try:
+            files = attach.from_clipboard()
+        except Exception as exc:
+            files, problem = [], str(exc)
+        else:
+            problem = "clipboard tidak berisi gambar atau file"
+        if not files:
+            if not quiet:
+                self.notify(f"Tidak ada yang dilampirkan: {problem}", severity="warning")
+            return False
+        self.attachments += files
+        self.refresh_files()
+        return True
+
+    def drop_attachment(self):
+        self.attachments.pop()
+        self.refresh_files()
+
+    def refresh_files(self):
+        files = self.query_one("#files", Static)
+        files.update("  ".join(attach.describe([f]) for f in self.attachments) + "   (⌫ hapus)")
+        files.set_class(bool(self.attachments), "has")
 
     def run_command(self, text: str):
         name = text.split()[0]
@@ -467,9 +556,9 @@ class ChatApp(App):
             self.chat.prewarm()
 
     @work(thread=True, exclusive=True)
-    def send(self, text: str):
+    def send(self, text: str, files=()):
         try:
-            self.chat.send(text)
+            self.chat.send(text, attachments=files)
         except Exception as exc:
             self.call_from_thread(self.add_info, f"error: {exc}")
         finally:
@@ -479,8 +568,8 @@ class ChatApp(App):
         self.busy = False
         self.reply = None
         while self.queue:
-            text, bubble = self.queue.pop(0)
-            if self.dispatch_input(text, bubble):
+            text, bubble, files = self.queue.pop(0)
+            if self.dispatch_input(text, bubble, files):
                 break
         self.refresh_status()
         if not self.busy:

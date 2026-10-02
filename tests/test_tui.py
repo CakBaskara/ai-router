@@ -32,7 +32,7 @@ def make_app():
     app = ChatApp(CFG, None, None, False)
     app.chat.prewarm = lambda: None
     app.chat._catalog = [("claude", "haiku"), ("claude", "sonnet"), ("codex", "gpt-6.1-sol")]
-    app.chat.send = lambda text: Chat.send(app.chat, text, runner=fake_runner)
+    app.chat.send = lambda text, attachments=(): Chat.send(app.chat, text, runner=fake_runner)
     return app
 
 
@@ -147,7 +147,7 @@ def test_prompt_sent_while_busy_is_queued_then_sent():
         release = asyncio.Event()
         loop = asyncio.get_running_loop()
 
-        def slow(text):
+        def slow(text, attachments=()):
             sent.append(text)
             if len(sent) == 1:
                 asyncio.run_coroutine_threadsafe(release.wait(), loop).result()

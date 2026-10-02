@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import attach
+
 CLASSIFIER_PROMPT = (
     "Classify the user's request by how capable a model must be to answer it well. "
     "light: lookup, definition, short syntax or command question. "
@@ -109,25 +111,33 @@ def build(provider: str, model: str, effort: str, prompt: str, interactive: bool
     raise ValueError(f"unknown provider: {provider}")
 
 
-def chat_cmd(provider: str, model: str, effort: str, session: str | None) -> list[str]:
+def chat_cmd(provider: str, model: str, effort: str, session: str | None, files=(),
+             attach_dir: str | None = None) -> list[str]:
+    images = [str(f) for f in files if attach.is_image(Path(f))]
     if provider == "claude":
         cmd = claude_cmd() + [
             "-p", "--model", model, "--effort", effort, "--permission-mode", "auto",
             "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
             "--include-partial-messages"]
+        cmd += ["--add-dir", attach_dir] if attach_dir else []
         return cmd + (["--resume", session] if session else [])
     if provider == "codex":
         common = ["-m", model, "-c", f"model_reasoning_effort={effort}", "--json", "--skip-git-repo-check"]
+        common += [arg for img in images for arg in ("-i", img)]
         if session:
             return codex_cmd() + ["exec", "resume"] + common + ["-c", 'sandbox_mode="workspace-write"', session, "-"]
         return codex_cmd() + ["exec"] + common + ["-s", "workspace-write", "-"]
     if provider == "gemini":
         cmd = gemini_cmd() + ["-p", " ", "-m", model, "-o", "stream-json", "--approval-mode", "auto_edit",
                               "--skip-trust"]
+        cmd += ["--include-directories", attach_dir] if files and attach_dir else []
         return cmd + (["--resume", session] if session else [])
     if provider == "copilot":
         cmd = copilot_cmd() + _copilot_model(model, effort) + [
             "--output-format", "json", "--allow-all-tools", "--no-ask-user"] + _deny(COPILOT_DENY)
+        cmd += [arg for f in files for arg in ("--attachment", str(f))
+                if attach.is_image(Path(f)) or Path(f).suffix.lower() == ".pdf"]
+        cmd += ["--add-dir", attach_dir] if files and attach_dir else []
         return cmd + (["--session-id", session] if session else [])
     raise ValueError(f"unknown provider: {provider}")
 

@@ -9,7 +9,7 @@ description = "Route each prompt to the cheapest Gemini, Copilot, Claude Code or
 requires-python = ">=3.11"
 license = { text = "MIT" }
 readme = "README.md"
-dependencies = ["textual>=8"]
+dependencies = ["textual>=8", "pillow>=10"]
 
 [project.scripts]
 ai = "airouter.cli:main"

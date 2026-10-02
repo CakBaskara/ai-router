@@ -163,6 +163,34 @@ def llm_classify(prompt: str, model: str) -> str | None:
     return None
 
 
+GEMINI_SKIP = ("tts", "image", "robotics", "computer-use", "transcribe", "customtools", "embedding", "-pro")
+
+
+def gemini_models() -> list[str]:
+    import urllib.request
+    load_user_env("GEMINI_API_KEY")
+    key = os.environ.get("GEMINI_API_KEY")
+    if not key:
+        return []
+    req = urllib.request.Request("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200",
+                                 headers={"x-goog-api-key": key})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return []
+    names = []
+    for m in data.get("models", []):
+        name = m.get("name", "").removeprefix("models/")
+        if (name.startswith("gemini-") and "generateContent" in m.get("supportedGenerationMethods", [])
+                and not any(s in name for s in GEMINI_SKIP)):
+            names.append(name)
+    return names
+
+
+DISCOVER = {"codex": lambda: codex_models(), "gemini": lambda: gemini_models()}
+
+
 def codex_models() -> list[str]:
     try:
         out = subprocess.run(codex_cmd() + ["debug", "models"], capture_output=True, timeout=30)

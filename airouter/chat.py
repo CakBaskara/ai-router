@@ -373,6 +373,7 @@ class Chat:
         self.pinned_tier = tier
         self.pinned_model = None
         self._catalog = None
+        self._catalog_lock = threading.Lock()
         self._proc = None
         self._claude = None
         self._cancelled = False
@@ -529,12 +530,20 @@ class Chat:
             if k in state:
                 setattr(self, k, state[k])
 
+    def catalog_ready(self) -> bool:
+        return self._catalog is not None
+
     def catalog(self) -> list[tuple[str, str]]:
+        with self._catalog_lock:
+            return self._load_catalog()
+
+    def _load_catalog(self) -> list[tuple[str, str]]:
         if self._catalog is None:
             models = self.cfg.get("models", {})
             catalog = []
             for provider in self.cfg["providers"]:
-                listed = models.get(provider) or (dispatch.codex_models() if provider == "codex" else [])
+                found = dispatch.DISCOVER[provider]() if provider in dispatch.DISCOVER else []
+                listed = list(dict.fromkeys(models.get(provider, []) + found))
                 catalog += [(provider, m) for m in listed]
             self._catalog = catalog
         return self._catalog

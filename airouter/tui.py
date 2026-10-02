@@ -12,12 +12,12 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.theme import Theme
-from textual.widgets import Markdown, OptionList, Static, TextArea
-from textual.widgets.option_list import Option
+from textual.widgets import Markdown, Static, TextArea, Tree
 
 from . import config
 from .chat import HELP, Chat
 
+PICKER_ORDER = ("gemini", "copilot", "codex", "claude")
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 PACKAGE = Path(__file__).parent
 MODULES = ("config", "classify", "journal", "dispatch", "learn", "chat", "tui")
@@ -100,10 +100,14 @@ Composer:focus { border: round #0078D4; }
 Composer .text-area--selection { background: #264F78; }
 #status { height: 1; background: #181818; color: #9D9D9D; padding: 0 1; }
 ModelPicker { align: center middle; background: #000000 50%; }
-#picker { width: 64; height: auto; max-height: 90%; border: round #454545; background: #202020; padding: 1 2; }
-#picker-title { color: #CCCCCC; text-style: bold; margin-bottom: 1; }
-#picker OptionList { height: auto; max-height: 26; border: none; background: #202020; color: #CCCCCC; }
-#picker OptionList > .option-list--option-highlighted { background: #04395E; color: #FFFFFF; }
+#picker { width: 64; height: 90%; border: round #454545; background: #202020; padding: 0 2; }
+#picker-title { color: #CCCCCC; text-style: bold; margin: 1 0; }
+#picker-hint { color: #6E7681; margin: 1 0; }
+#picker-tree { height: 1fr; border: none; background: #202020; color: #CCCCCC; padding: 0; }
+#picker-tree > .tree--cursor { background: #04395E; color: #FFFFFF; }
+#picker-tree > .tree--highlight { background: #2A2D2E; }
+#picker-tree > .tree--guides { color: #3C3C3C; }
+#picker-tree > .tree--guides-selected { color: #6E7681; }
 """
 KEY_EVENT = 0x0001
 SHIFT_PRESSED = 0x0010
@@ -222,29 +226,61 @@ class ModelChip(Static):
 
 
 class ModelPicker(ModalScreen):
-    BINDINGS = [Binding("escape", "dismiss", "Tutup")]
+    BINDINGS = [
+        Binding("escape", "dismiss", "Tutup"),
+        Binding("home", "first", show=False, priority=True),
+        Binding("end", "last", show=False, priority=True),
+    ]
 
-    def __init__(self, catalog: list[tuple[str, str]], current: str, auto: bool):
+    def __init__(self, catalog: list[tuple[str, str]], current: str, auto: bool, free: list[str] = (),
+                 provider: str | None = None):
         super().__init__()
+        self.free = list(free)
         self.catalog = catalog
         self.current = current
         self.auto = auto
+        self.provider = provider
 
     def compose(self) -> ComposeResult:
-        options = [Option(Text.assemble(("● " if self.auto else "  "), ("Otomatis", "bold"),
-                                        ("  router memilih per pesan", "dim")), id="auto")]
-        for provider in dict.fromkeys(p for p, _ in self.catalog):
-            options.append(Option(Text(provider.capitalize(), style="bold dim"), disabled=True))
-            for i, (p, model) in enumerate(self.catalog):
-                if p == provider:
-                    mark = "● " if model == self.current and not self.auto else "  "
-                    options.append(Option(Text.assemble(mark, model), id=str(i + 1)))
+        tree = Tree("model", id="picker-tree")
+        tree.show_root = False
+        tree.guide_depth = 3
+        tree.root.add_leaf(Text.assemble(("● " if self.auto else "  "), ("Otomatis", "bold"),
+                                         ("  router memilih per pesan", "dim")), data="auto")
+        present = list(dict.fromkeys(p for p, _ in self.catalog))
+        for provider in [p for p in PICKER_ORDER if p in present] + [p for p in present if p not in PICKER_ORDER]:
+            models = [(i, m) for i, (p, m) in enumerate(self.catalog) if p == provider]
+            kind = "gratis" if provider in self.free else "berbayar"
+            mine = not self.auto and provider == self.provider
+            folder = tree.root.add(Text.assemble((provider.capitalize(), "bold"),
+                                                 (f"  {kind} · {len(models)} model", "dim")),
+                                   expand=mine)
+            folder.add_leaf(Text.assemble(("● " if mine and self.current == provider else "  "),
+                                          ("otomatis", "italic"), ("  model dipilih router", "dim")),
+                            data=f"prov:{provider}")
+            for i, model in models:
+                mark = "● " if mine and model == self.current else "  "
+                folder.add_leaf(Text.assemble(mark, model), data=str(i + 1))
         with Vertical(id="picker"):
             yield Static("Pilih model", id="picker-title")
-            yield OptionList(*options)
+            yield tree
+            yield Static("↑↓ pilih · Enter buka / pakai · Esc tutup", id="picker-hint")
 
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected):
-        self.dismiss(event.option.id)
+    def on_mount(self):
+        tree = self.query_one(Tree)
+        tree.focus()
+        tree.cursor_line = 0
+
+    def action_first(self):
+        self.query_one(Tree).move_cursor_to_line(0)
+
+    def action_last(self):
+        tree = self.query_one(Tree)
+        tree.move_cursor_to_line(tree.last_line)
+
+    def on_tree_node_selected(self, event: Tree.NodeSelected):
+        if event.node.data:
+            self.dismiss(event.node.data)
 
 
 class TuiUI:
@@ -478,15 +514,39 @@ class ChatApp(App):
         self.chat.prewarm()
 
     def action_models(self):
+        if isinstance(self.screen, ModelPicker):
+            return
+        if self.chat.catalog_ready():
+            self.open_picker()
+        else:
+            self.notify("Memuat daftar model…")
+            self.load_then_open()
+
+    @work(thread=True, exclusive=True, group="catalog")
+    def load_then_open(self):
+        self.chat.catalog()
+        self.call_from_thread(self.open_picker)
+
+    def open_picker(self):
+        if isinstance(self.screen, ModelPicker):
+            return
         c = self.chat
         auto = not (c.pinned_model or c.pinned_provider)
-        self.push_screen(ModelPicker(c.catalog(), c.label(), auto), self.picked)
+        free = c.cfg.get("routing", {}).get("free", [])
+        provider = c.pinned_provider or c.provider
+        current = c.pinned_model or (provider if c.pinned_provider and not c.pinned_model else c.label())
+        self.push_screen(ModelPicker(c.catalog(), current, auto, free, provider), self.picked)
 
     def picked(self, choice):
         if choice == "auto":
             self.chat.command("/model auto")
+            self.notify("Model: otomatis")
+        elif choice and choice.startswith("prov:"):
+            self.chat.command("/" + choice[5:])
+            self.notify(f"Provider: {choice[5:]} (model dipilih router)")
         elif choice:
             self.chat.pick(choice)
+            self.notify(f"Model: {self.chat.label()} ({self.chat.pinned_provider})")
         self.refresh_status()
         self.chat.prewarm()
         self.query_one(Composer).focus()

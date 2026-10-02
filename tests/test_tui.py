@@ -170,3 +170,75 @@ def test_prompt_sent_while_busy_is_queued_then_sent():
             assert sent == ["pertama", "kedua"] and not app.queue
             assert app.query(UserBubble)[-1].border_title == "kamu"
     asyncio.run(go())
+
+
+def test_picker_shows_provider_folders_in_order():
+    from textual.widgets import Tree
+
+    async def go():
+        app = make_app()
+        app.chat._catalog = [("claude", "opus"), ("codex", "gpt-6.1-sol"), ("gemini", "gemini-3.8-flash"),
+                             ("copilot", "auto")]
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.press("ctrl+o")
+            await pilot.pause()
+            tree = app.screen.query_one(Tree)
+            names = [str(n.label).split()[0] for n in tree.root.children[1:]]
+            assert names == ["Gemini", "Copilot", "Codex", "Claude"]
+            assert not any(n.is_expanded for n in tree.root.children[1:])
+    asyncio.run(go())
+
+
+def test_picker_opens_folder_then_picks_model_with_keys():
+    from textual.widgets import Tree
+
+    async def go():
+        app = make_app()
+        app.chat._catalog = [("gemini", "gemini-3.8-flash"), ("codex", "gpt-6.1-sol"), ("codex", "gpt-5.5")]
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.press("ctrl+o")
+            await pilot.pause()
+            tree = app.screen.query_one(Tree)
+            await pilot.press("down", "down")
+            assert "Codex" in str(tree.cursor_node.label)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert tree.cursor_node.is_expanded
+            await pilot.press("down", "down", "down", "enter")
+            await pilot.pause()
+            assert (app.chat.pinned_provider, app.chat.pinned_model) == ("codex", "gpt-5.5")
+    asyncio.run(go())
+
+
+def test_picker_provider_only_choice_pins_provider():
+    async def go():
+        app = make_app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.press("ctrl+o")
+            await pilot.pause()
+            app.screen.dismiss("prov:codex")
+            await pilot.pause()
+            assert (app.chat.pinned_provider, app.chat.pinned_model) == ("codex", None)
+    asyncio.run(go())
+
+
+def test_picker_scrolls_to_last_model_on_short_terminal():
+    from textual.widgets import Tree
+
+    async def go():
+        app = make_app()
+        app.chat._catalog = [("claude", f"model-{i}") for i in range(40)]
+        async with app.run_test(size=(100, 20)) as pilot:
+            await pilot.press("ctrl+o")
+            await pilot.pause()
+            tree = app.screen.query_one(Tree)
+            await pilot.press("down", "enter")
+            await pilot.pause()
+            assert tree.size.height < 42
+            await pilot.press("end")
+            await pilot.pause(0.3)
+            assert tree.cursor_node.data == "40" and tree.scroll_y > 0
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.chat.pinned_model == "model-39"
+    asyncio.run(go())

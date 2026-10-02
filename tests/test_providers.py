@@ -93,3 +93,28 @@ def test_catalog_lists_every_provider():
     c = Chat(CFG, use_llm=False)
     providers = {p for p, _ in c.catalog()}
     assert {"gemini", "copilot", "claude", "codex"} <= providers
+
+
+def test_copilot_auto_model_sends_no_effort():
+    cmd = dispatch.chat_cmd("copilot", "auto", "low", None)
+    assert "--reasoning-effort" not in cmd
+    pinned = dispatch.chat_cmd("copilot", "gpt-6-luna", "high", None)
+    assert pinned[pinned.index("--reasoning-effort") + 1] == "high"
+
+
+def test_empty_answer_falls_back_to_next_provider():
+    c = Chat(CFG, use_llm=False)
+    calls = []
+
+    def runner(cmd, prompt, turn, show, started):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return 0
+        turn.feed({"type": "assistant.message_delta", "data": {"deltaContent": "ok"}})
+        turn.feed({"type": "result", "sessionId": "c1", "exitCode": 0, "usage": {}})
+        return 0
+
+    c.command("/model light")
+    c.pinned_tier = "light"
+    assert c.send("halo", runner=runner) == 0
+    assert len(calls) == 2 and c.provider == "copilot" and c.transcript[-1] == ("Assistant", "ok")

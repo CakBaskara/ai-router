@@ -29,6 +29,7 @@ def main(argv=None) -> int:
     args = _parse(argv if argv is not None else sys.argv[1:])
     cfg = config.load()
     rules.sync()
+    dispatch.load_user_env("GEMINI_API_KEY")
 
     if args.ml:
         print(json.dumps(learn.Learner.load().report(cfg["classifier"].get("ml_target_accuracy", 0.9)), indent=2))

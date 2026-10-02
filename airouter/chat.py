@@ -480,6 +480,8 @@ class Chat:
             if self._cancelled:
                 code = 130
             seconds = round(time.time() - started, 1)
+            if code == 0 and not turn.error and not turn.text():
+                turn.error = "tidak ada jawaban"
             ok = code == 0 and not turn.error
             self._log(msg, tier, reasons, llm, provider, route, code, seconds, turn.session)
             if ok or code == 130:

@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -60,6 +61,30 @@ def _deny(rules: list[str]) -> list[str]:
     return [arg for rule in rules for arg in ("--deny-tool", rule)]
 
 
+def _copilot_model(model: str, effort: str) -> list[str]:
+    if model == "auto":
+        return ["--model", "auto"]
+    return ["--model", model, "--reasoning-effort", effort]
+
+
+def load_user_env(*names: str):
+    if sys.platform != "win32":
+        return
+    import winreg
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment")
+    except OSError:
+        return
+    with key:
+        for name in names:
+            if os.environ.get(name):
+                continue
+            try:
+                os.environ[name] = str(winreg.QueryValueEx(key, name)[0])
+            except OSError:
+                pass
+
+
 def build(provider: str, model: str, effort: str, prompt: str, interactive: bool) -> tuple[list[str], str | None]:
     if provider == "claude":
         base = claude_cmd() + ["--model", model, "--effort", effort]
@@ -77,7 +102,7 @@ def build(provider: str, model: str, effort: str, prompt: str, interactive: bool
             return gemini_cmd() + ["-m", model] + (["-i", prompt] if prompt else []), None
         return gemini_cmd() + ["-p", " ", "-m", model, "--approval-mode", "plan", "--skip-trust"], prompt
     if provider == "copilot":
-        base = copilot_cmd() + ["--model", model, "--reasoning-effort", effort]
+        base = copilot_cmd() + _copilot_model(model, effort)
         if interactive:
             return base + (["-i", prompt] if prompt else []), None
         return base + ["-s", "--allow-all-tools", "--no-ask-user"] + _deny(["shell", "write"]), prompt
@@ -101,8 +126,8 @@ def chat_cmd(provider: str, model: str, effort: str, session: str | None) -> lis
                               "--skip-trust"]
         return cmd + (["--resume", session] if session else [])
     if provider == "copilot":
-        cmd = copilot_cmd() + ["--model", model, "--reasoning-effort", effort, "--output-format", "json",
-                               "--allow-all-tools", "--no-ask-user"] + _deny(COPILOT_DENY)
+        cmd = copilot_cmd() + _copilot_model(model, effort) + [
+            "--output-format", "json", "--allow-all-tools", "--no-ask-user"] + _deny(COPILOT_DENY)
         return cmd + (["--session-id", session] if session else [])
     raise ValueError(f"unknown provider: {provider}")
 

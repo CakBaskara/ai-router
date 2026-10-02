@@ -1,0 +1,62 @@
+{"text": "apa itu decorator di python?", "tier": "light", "source": "seed"}
+{"text": "halo", "tier": "light", "source": "seed"}
+{"text": "ini beneran aktif kah?", "tier": "light", "source": "seed"}
+{"text": "makasih ya", "tier": "light", "source": "seed"}
+{"text": "oke lanjut", "tier": "light", "source": "seed"}
+{"text": "perintah git untuk lihat branch aktif", "tier": "light", "source": "seed"}
+{"text": "singkatan LC3 itu apa", "tier": "light", "source": "seed"}
+{"text": "bahasa inggrisnya tetap mencoba lagi apa", "tier": "light", "source": "seed"}
+{"text": "format tanggal iso 8601 seperti apa", "tier": "light", "source": "seed"}
+{"text": "shortcut vscode buat duplikat baris", "tier": "light", "source": "seed"}
+{"text": "cara aktifkan venv di powershell", "tier": "light", "source": "seed"}
+{"text": "versi python yang terpasang berapa", "tier": "light", "source": "seed"}
+{"text": "what does git stash do", "tier": "light", "source": "seed"}
+{"text": "how do I list files sorted by size", "tier": "light", "source": "seed"}
+{"text": "beda list dan tuple", "tier": "light", "source": "seed"}
+{"text": "jam berapa sekarang di jakarta", "tier": "light", "source": "seed"}
+{"text": "tolong terjemahkan kalimat ini ke inggris", "tier": "light", "source": "seed"}
+{"text": "nama file konfigurasinya di mana", "tier": "light", "source": "seed"}
+{"text": "yang tadi maksudnya apa", "tier": "light", "source": "seed"}
+{"text": "sudah selesai belum", "tier": "light", "source": "seed"}
+{"text": "contoh regex untuk email", "tier": "light", "source": "seed"}
+{"text": "port default postgres berapa", "tier": "light", "source": "seed"}
+{"text": "tambah test untuk fungsi parse_period", "tier": "medium", "source": "seed"}
+{"text": "perbaiki error di fungsi download", "tier": "medium", "source": "seed"}
+{"text": "buat script python untuk rename semua file pdf di folder ini", "tier": "medium", "source": "seed"}
+{"text": "buat file readme untuk project ini", "tier": "medium", "source": "seed"}
+{"text": "tolong ubah output jadi csv", "tier": "medium", "source": "seed"}
+{"text": "jelaskan kode di announce.py baris 40 sampai 80", "tier": "medium", "source": "seed"}
+{"text": "kenapa test ini gagal: AssertionError expected 3 got 2", "tier": "medium", "source": "seed"}
+{"text": "coba check kayaknya ada download yang gagal hari ini", "tier": "medium", "source": "seed"}
+{"text": "cek log hari ini ada error apa", "tier": "medium", "source": "seed"}
+{"text": "update dependency di pyproject dan pastikan test lulus", "tier": "medium", "source": "seed"}
+{"text": "write a function that merges two sorted lists", "tier": "medium", "source": "seed"}
+{"text": "add a --verbose flag to the cli", "tier": "medium", "source": "seed"}
+{"text": "pindahkan konstanta ke config.toml", "tier": "medium", "source": "seed"}
+{"text": "buat query sql untuk total transaksi per bulan", "tier": "medium", "source": "seed"}
+{"text": "tolong rapikan fungsi ini supaya lebih pendek", "tier": "medium", "source": "seed"}
+{"text": "review perubahan di branch ini", "tier": "medium", "source": "seed"}
+{"text": "pdf ini tidak bisa dibaca, coba cek kenapa", "tier": "medium", "source": "seed"}
+{"text": "jalankan test dan laporkan hasilnya", "tier": "medium", "source": "seed"}
+{"text": "buat endpoint baru untuk ambil daftar emiten", "tier": "medium", "source": "seed"}
+{"text": "ganti nama variabel ini di semua file", "tier": "medium", "source": "seed"}
+{"text": "kenapa mic ISO kehilangan frame tiap 160 detik? cari root cause", "tier": "heavy", "source": "seed"}
+{"text": "rancang arsitektur router multi-model dengan fallback", "tier": "heavy", "source": "seed"}
+{"text": "proses download kadang mati di tengah tanpa log, padahal tidak ada exception", "tier": "heavy", "source": "seed"}
+{"text": "audio putus-putus hanya kalau bluetooth dan wifi aktif bersamaan", "tier": "heavy", "source": "seed"}
+{"text": "bandingkan tiga pendekatan sinkronisasi clock dan pilih yang paling cocok untuk kasus kita", "tier": "heavy", "source": "seed"}
+{"text": "susun rencana migrasi database tanpa downtime", "tier": "heavy", "source": "seed"}
+{"text": "kenapa hasil ekstraksi berbeda antara windows dan linux untuk pdf yang sama", "tier": "heavy", "source": "seed"}
+{"text": "desain ulang modul ini supaya bisa dites tanpa hardware", "tier": "heavy", "source": "seed"}
+{"text": "design a caching layer that survives restarts and stays consistent", "tier": "heavy", "source": "seed"}
+{"text": "figure out why latency spikes every few minutes under load", "tier": "heavy", "source": "seed"}
+{"text": "buktikan apakah perubahan ini memperbaiki masalah atau cuma kebetulan", "tier": "heavy", "source": "seed"}
+{"text": "cari tahu kenapa memori terus naik sampai crash setelah dua hari", "tier": "heavy", "source": "seed"}
+{"text": "evaluasi strategi trading ini dan risikonya", "tier": "heavy", "source": "seed"}
+{"text": "rencanakan pemisahan monolith ini jadi beberapa service", "tier": "heavy", "source": "seed"}
+{"text": "kenapa sinyal ini jitter padahal timer sudah presisi", "tier": "heavy", "source": "seed"}
+{"text": "bikin rancangan pipeline OCR yang tahan crash dan bisa lanjut dari titik terakhir", "tier": "heavy", "source": "seed"}
+{"text": "analisa log ini dan temukan pola kegagalannya", "tier": "heavy", "source": "seed"}
+{"text": "deadlock muncul acak di thread pool, telusuri", "tier": "heavy", "source": "seed"}
+{"text": "pikirkan trade-off antara akurasi dan kecepatan untuk classifier ini", "tier": "heavy", "source": "seed"}
+{"text": "data di dua tabel tidak konsisten setelah sinkronisasi malam, kenapa", "tier": "heavy", "source": "seed"}

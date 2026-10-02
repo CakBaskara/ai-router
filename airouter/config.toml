@@ -1,0 +1,48 @@
+providers = ["claude", "codex"]
+
+[classifier]
+llm_fallback = true
+model = "haiku"
+# The local model decides alone only above the confidence that kept its held-out accuracy at this level.
+ml_target_accuracy = 0.9
+ml_min_labels = 30
+
+[chat]
+min_tier = "heavy"
+
+# Shown by /models in chat. Codex models come from `codex debug models` unless listed here.
+[models]
+claude = ["haiku", "sonnet", "opus", "claude-fable-5-1"]
+
+[tiers.light]
+claude = { model = "haiku", effort = "low" }
+codex = { model = "gpt-5.6-luna", effort = "low" }
+
+[tiers.medium]
+claude = { model = "sonnet", effort = "medium" }
+codex = { model = "gpt-5.6-terra", effort = "medium" }
+
+[tiers.heavy]
+claude = { model = "opus", effort = "high" }
+codex = { model = "gpt-6-astra", effort = "high" }
+
+[rules]
+heavy = [
+    "arsitektur", "architecture", "rancang", "desain sistem", "system design",
+    "refactor", "root cause", "akar masalah", "race condition", "deadlock",
+    "memory leak", "bocor", "optimasi", "optimi", "performa", "performance",
+    "migrasi", "migrate", "audit", "analisa", "analisis", "analy",
+    "security", "keamanan", "concurrency", "algoritma", "algorithm",
+    "kenapa", "mengapa", "why", "trade-off", "tradeoff", "strategi",
+]
+medium = [
+    "debug", "bug", "error", "crash", "gagal", "fail", "exception", "traceback",
+    "test", "fungsi", "function", "class", "script", "implement", "tambah",
+    "add", "ubah", "change", "fix", "perbaiki", "review", "jelaskan kode",
+    "explain this code", "sql", "regex", "api",
+]
+light = [
+    "apa itu", "what is", "arti", "artinya", "terjemah", "translate",
+    "contoh", "example", "singkat", "sintaks", "syntax", "typo", "rename",
+    "perintah", "command", "shortcut", "cara ", "how to", "versi", "version",
+]

@@ -161,14 +161,14 @@ def test_prompt_sent_while_busy_is_queued_then_sent():
             app.query_one(Composer).insert("kedua")
             await pilot.press("enter")
             await pilot.pause(0.1)
-            assert app.queue and app.query(UserBubble)[-1].border_title == "kamu · antre"
+            assert app.queue and app.query(UserBubble)[-1].has_class("queued")
             release.set()
             for _ in range(60):
                 await pilot.pause(0.05)
                 if len(sent) == 2 and not app.busy:
                     break
             assert sent == ["pertama", "kedua"] and not app.queue
-            assert app.query(UserBubble)[-1].border_title == "kamu"
+            assert not app.query(UserBubble)[-1].has_class("queued")
     asyncio.run(go())
 
 

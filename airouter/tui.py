@@ -66,23 +66,21 @@ DARK_MODERN = Theme(
         "scrollbar": "#424242",
         "scrollbar-hover": "#4F4F4F",
         "scrollbar-active": "#5A5A5A",
-        "scrollbar-background": "#1F1F1F",
+        "scrollbar-background": "ansi_default",
     },
 )
 
 CSS = """
-Screen { background: #1F1F1F; }
+Screen { background: ansi_default; }
 Screen .screen--selection { background: #264F78; }
-#top { height: 1; background: #181818; padding: 0 1; }
+#top { height: 1; background: ansi_default; padding: 0 1; }
 #brand { width: auto; color: #CCCCCC; text-style: bold; }
 #cwd { width: 1fr; color: #9D9D9D; padding: 0 2; }
 #model { width: auto; color: #CCCCCC; padding: 0 1; }
 #model:hover { background: #2B2B2B; }
-#log { padding: 0 2 1 2; background: #1F1F1F; }
-UserBubble {
-    margin: 1 0 0 0; padding: 0 1; background: #262626;
-    border: round #3C3C3C; border-title-color: #9D9D9D;
-}
+#log { padding: 0 2 1 2; background: ansi_default; }
+UserBubble { margin: 1 0 0 0; padding: 0 1; background: #262626; }
+UserBubble.queued { color: #6E7681; }
 Reply { height: auto; margin: 1 0 0 0; }
 Reply .who { color: #CCCCCC; text-style: bold; }
 Reply .why { color: #6E7681; }
@@ -91,14 +89,12 @@ Reply Markdown { margin: 0; padding: 0 0 0 2; background: transparent; }
 Reply .stats { color: #6E7681; padding-left: 2; }
 Reply.failed .who { color: #F85149; }
 Info { color: #6E7681; text-style: italic; margin: 1 0 0 0; }
-#bottom { dock: bottom; height: auto; padding: 0 1; background: #1F1F1F; }
-Composer {
-    height: auto; min-height: 3; max-height: 12; background: #313131; color: #CCCCCC;
-    border: round #3C3C3C;
-}
-Composer:focus { border: round #0078D4; }
+#bottom { dock: bottom; height: auto; padding: 0 1 1 1; background: ansi_default; border-top: solid #2B2B2B; }
+#prompt { width: 2; color: #6E7681; background: ansi_default; }
+#inputrow { height: auto; background: ansi_default; }
+Composer { height: auto; min-height: 1; max-height: 10; background: ansi_default; color: #CCCCCC; border: none; padding: 0; }
+Composer:focus { border: none; }
 Composer .text-area--selection { background: #264F78; }
-#status { height: 1; background: #181818; color: #9D9D9D; padding: 0 1; }
 ModelPicker { align: center middle; background: #000000 50%; }
 #picker { width: 64; height: 90%; border: round #454545; background: #202020; padding: 0 2; }
 #picker-title { color: #CCCCCC; text-style: bold; margin: 1 0; }
@@ -323,7 +319,7 @@ class ChatApp(App):
     ]
 
     def __init__(self, cfg: dict, provider: str | None, tier: str | None, use_llm: bool, state: dict | None = None):
-        super().__init__()
+        super().__init__(ansi_color=True)
         self.chat = Chat(cfg, provider, tier, use_llm, ui=TuiUI(self))
         self.restored = bool(state)
         if state:
@@ -340,9 +336,9 @@ class ChatApp(App):
             yield ModelChip("", id="model", markup=False)
         yield VerticalScroll(id="log")
         with Vertical(id="bottom"):
-            yield Composer(id="input", placeholder="Tanya apa saja…   Enter kirim · Shift+Enter baris baru",
-                           highlight_cursor_line=False)
-            yield Static("", id="status", markup=False)
+            with Horizontal(id="inputrow"):
+                yield Static("›", id="prompt")
+                yield Composer(id="input", placeholder="Tanya apa saja…", highlight_cursor_line=False)
 
     def on_mount(self):
         self.register_theme(DARK_MODERN)
@@ -350,9 +346,7 @@ class ChatApp(App):
         if self.restored:
             for role, text in self.chat.transcript:
                 if role == "User":
-                    bubble = UserBubble(text, markup=False)
-                    bubble.border_title = "kamu"
-                    self._mount(bubble)
+                    self._bubble(text)
                 else:
                     self._mount(Reply("sebelumnya", "", text, done=True))
             self.add_info("Kode diperbarui dan dimuat ulang; percakapan tetap berlanjut.")
@@ -386,14 +380,8 @@ class ChatApp(App):
         self.chat.catalog()
 
     def refresh_status(self):
-        c = self.chat
-        mode = "dikunci" if (c.pinned_model or c.pinned_provider or c.pinned_tier) else "otomatis"
-        self.query_one("#model", Static).update(f"◆ {c.label()} ▾")
-        parts = [f"{c.pinned_provider or c.provider or '-'} · {c.pinned_tier or c.tier or '-'} · {mode}",
-                 "Ctrl+O model · Esc batal · Ctrl+N baru · Ctrl+Q keluar"]
-        if self.queue:
-            parts.insert(1, f"antre {len(self.queue)}")
-        self.query_one("#status", Static).update("   │   ".join(parts))
+        queued = f"  ·  antre {len(self.queue)}" if self.queue else ""
+        self.query_one("#model", Static).update(f"◆ {self.chat.label()} ▾{queued}")
 
     def _mount(self, widget):
         log = self.query_one("#log", VerticalScroll)
@@ -438,15 +426,14 @@ class ChatApp(App):
             return
         self.query_one(Composer).clear()
         if self.busy:
-            bubble = None if text.startswith("/") else self._bubble(text, "kamu · antre")
+            bubble = None if text.startswith("/") else self._bubble(text, queued=True)
             self.queue.append((text, bubble))
             self.refresh_status()
             return
         self.dispatch_input(text)
 
-    def _bubble(self, text: str, title: str) -> UserBubble:
-        bubble = UserBubble(text, markup=False)
-        bubble.border_title = title
+    def _bubble(self, text: str, queued: bool = False) -> UserBubble:
+        bubble = UserBubble(text, markup=False, classes="queued" if queued else "")
         self._mount(bubble)
         return bubble
 
@@ -455,9 +442,9 @@ class ChatApp(App):
             self.run_command(text)
             return False
         if bubble:
-            bubble.border_title = "kamu"
+            bubble.remove_class("queued")
         else:
-            self._bubble(text, "kamu")
+            self._bubble(text)
         self.busy = True
         self.send(text)
         return True

@@ -14,13 +14,13 @@ from textual.screen import ModalScreen
 from textual.theme import Theme
 from textual.widgets import Markdown, Static, TextArea, Tree
 
-from . import attach, config
+from . import attach, config, embed
 from .chat import HELP, Chat
 
 PICKER_ORDER = ("gemini", "copilot", "codex", "claude")
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 PACKAGE = Path(__file__).parent
-MODULES = ("config", "classify", "journal", "attach", "dispatch", "learn", "chat", "tui")
+MODULES = ("config", "classify", "journal", "attach", "embed", "dispatch", "learn", "chat", "tui")
 
 
 def _watched() -> list[Path]:
@@ -392,6 +392,7 @@ class ChatApp(App):
         self.refresh_status()
         self.query_one(Composer).focus()
         self.warm_catalog()
+        self.warm_classifier()
         self.chat.prewarm()
         self.set_interval(2, self.check_code)
 
@@ -414,6 +415,11 @@ class ChatApp(App):
     @work(thread=True)
     def warm_catalog(self):
         self.chat.catalog()
+
+    @work(thread=True)
+    def warm_classifier(self):
+        if self.chat.cfg["classifier"].get("embed", True):
+            embed.warm(self.chat.ui.info)
 
     def refresh_status(self):
         queued = f"  ·  antre {len(self.queue)}" if self.queue else ""

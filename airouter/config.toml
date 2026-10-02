@@ -11,6 +11,12 @@ model = "haiku"
 # The local model decides alone only above the confidence that kept its held-out accuracy at this level.
 ml_target_accuracy = 0.9
 ml_min_labels = 30
+# Granite Embedding 97M multilingual (ONNX, ~120 MB in logs/models) replaces Naive Bayes once it is loaded.
+embed = true
+# Share of confident local decisions the model above re-checks in the background; disagreements become labels.
+audit_rate = 0.1
+# Stronger model that labels past prompts from routes.jsonl when `ai --ml-train` runs.
+teacher = "sonnet"
 
 [chat]
 min_tier = "light"

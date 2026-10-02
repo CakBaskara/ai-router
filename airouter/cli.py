@@ -5,7 +5,7 @@ import sys
 import time
 from datetime import datetime
 
-from . import chat, config, dispatch, learn, rules
+from . import chat, config, dispatch, embed, learn, rules
 from .classify import TIERS, classify
 from .journal import log, say, usage_today
 
@@ -20,6 +20,8 @@ def _parse(argv):
     p.add_argument("--no-llm", action="store_true", help="never ask a model to classify")
     p.add_argument("--plain", action="store_true", help="chat as plain text lines instead of the full-screen app")
     p.add_argument("--ml", action="store_true", help="show what the local prompt classifier has learned")
+    p.add_argument("--ml-train", action="store_true",
+                   help="download the embedding model, let the teacher model label past prompts, then report")
     return p.parse_args(argv)
 
 
@@ -31,8 +33,13 @@ def main(argv=None) -> int:
     rules.sync()
     dispatch.load_user_env("GEMINI_API_KEY")
 
-    if args.ml:
-        print(json.dumps(learn.Learner.load().report(cfg["classifier"].get("ml_target_accuracy", 0.9)), indent=2))
+    if args.ml or args.ml_train:
+        c = cfg["classifier"]
+        if args.ml_train:
+            embed.warm(lambda text: say(f"· {text}"))
+            say(f"· {learn.teach(cfg, lambda text: say(f'· {text}'))} label baru dari guru")
+        encoder = embed.get() if c.get("embed", True) else None
+        print(json.dumps(learn.Learner.load(encoder).report(c.get("ml_target_accuracy", 0.9)), indent=2))
         return 0
 
     prompt = " ".join(args.prompt).strip()

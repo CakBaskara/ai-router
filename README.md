@@ -39,6 +39,8 @@ This puts `ai` (`ai.exe` on Windows) in the Python `Scripts` folder.
 | `ai -p codex "..."` | Force a provider: `gemini`, `copilot`, `claude`, `codex` |
 | `ai -n "..."` | Dry run: show the route, run nothing |
 | `ai --no-llm "..."` | Never ask a model to classify |
+| `ai --ml` | Show how well the local classifier routes |
+| `ai --ml-train` | Download the embedding model, let Sonnet label past prompts, then show the report |
 
 ## How a route is chosen
 
@@ -48,7 +50,8 @@ prompt
   ├─ rules (free): keywords, length, code or log, -i adds one point
   │     score ≤ 0 → light · 1–2 → medium · ≥ 3 → heavy
   │
-  ├─ no keyword matched → ask Haiku for one word (≈1.7k tokens, ≈5 s)
+  ├─ no keyword matched → local classifier (Granite embedding + logistic regression, ≈20 ms)
+  │     sure enough → its tier · unsure → ask Haiku for one word (≈1.7k tokens, ≈5 s)
   │
   ├─ tier → providers, from config.toml
   │     light, medium → gemini, copilot first (free), then claude, codex
@@ -145,17 +148,32 @@ In `--plain`, end a line with `\` to continue on the next one; Ctrl+C stops the 
 
 ## Learned classifier
 
-When no keyword matches, a local Naive Bayes model (`airouter/learn.py`, pure Python) guesses
-the tier first. It decides alone only when its confidence is above a threshold picked from
-held-out results: the lowest confidence at which past labels were still right at least
-`ml_target_accuracy` of the time. Otherwise Haiku is asked, and its answer becomes a new label.
+When no keyword matches, a local classifier guesses the tier first. Each prompt is turned
+into a 384-number vector by [Granite Embedding 97M multilingual R2](https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2)
+(ONNX int8, CPU, Indonesian included), and a small logistic regression trained on the labels
+picks the tier. The chat downloads the model (~120 MB, into `logs/models`) and loads it in the
+background on first start; until then, or with `embed = false`, a Naive Bayes model on words is used.
 
-Labels come from `airouter/seed_labels.jsonl` (hand-written start set), every Haiku answer, and
-corrections in chat: changing the tier or model after an answer labels your last message
-with that tier, counted three times. Learned labels live in `logs/labels.jsonl`.
+It decides alone only when its confidence is above a threshold picked from cross-validation:
+the lowest confidence at which past labels were still right at least `ml_target_accuracy` of
+the time. Otherwise Haiku is asked, and its answer becomes a new label.
 
-`ai --ml` prints the label count, held-out accuracy, the current threshold and how often the
-model decides alone.
+The labels improve themselves:
+
+| Source | When | Weight |
+|---|---|---|
+| `seed` | hand-written start set in `airouter/seed_labels.jsonl` | 1 |
+| `llm` | Haiku answered because the local model was unsure | 1 |
+| `audit` | `audit_rate` of the confident local decisions are re-checked by Haiku in the background | 1 |
+| `teacher` | `ai --ml-train` lets a stronger model (`teacher`, Sonnet) label past prompts from `routes.jsonl` | 2 |
+| `user` | you changed the tier or model after an answer | 3 |
+
+The same text keeps one label, the one from the strongest source. Learned labels live in
+`logs/labels.jsonl`, and audits in `logs/ml_audit.jsonl`.
+
+`ai --ml` prints the backend, label count, cross-validated accuracy, how often it routes too
+low, the threshold, how often it decides alone, and the audit agreement. Each run is appended
+to `logs/ml_history.jsonl`, so the trend stays visible.
 
 ## Configure
 

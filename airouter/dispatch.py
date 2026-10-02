@@ -153,6 +153,32 @@ def run(cmd: list[str], stdin_text: str | None, quiet_stderr: bool = False) -> i
     return done.returncode
 
 
+BATCH_PROMPT = (
+    CLASSIFIER_PROMPT.rsplit(" Reply", 1)[0]
+    + " You receive a JSON array of requests, each judged on its own. "
+    "Reply with only a JSON array of the same length holding light, medium or heavy for each."
+)
+
+
+def llm_classify_batch(prompts: list[str], model: str) -> list[str | None]:
+    cmd = claude_cmd() + [
+        "-p", "--model", model, "--effort", "low", "--tools", "",
+        "--no-session-persistence", "--strict-mcp-config",
+        "--output-format", "json", "--system-prompt", BATCH_PROMPT,
+    ]
+    try:
+        out = subprocess.run(cmd, input=json.dumps(prompts, ensure_ascii=False).encode("utf-8"),
+                             capture_output=True, timeout=300)
+        data = json.loads(out.stdout.decode("utf-8", "replace"))
+        text = str(data.get("result", ""))
+        tiers = json.loads(text[text.index("["):text.rindex("]") + 1])
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return [None] * len(prompts)
+    if data.get("is_error") or len(tiers) != len(prompts):
+        return [None] * len(prompts)
+    return [t.strip().lower() if isinstance(t, str) else None for t in tiers]
+
+
 def llm_classify(prompt: str, model: str) -> str | None:
     cmd = claude_cmd() + [
         "-p", "--model", model, "--effort", "low", "--tools", "",

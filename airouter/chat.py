@@ -417,10 +417,13 @@ class Chat:
         v = classify(msg, self.cfg.get("rules", {}))
         tier, reasons, llm = v.tier, list(v.reasons), False
         if v.ambiguous:
-            guess, why, llm = learn.judge(msg, self.cfg, self.ui.info, self.use_llm and self.tier is None)
+            ask = self.use_llm and self.tier is None
+            guess, why, llm = learn.judge(msg, self.cfg, self.ui.info, ask, wait=False)
             if guess:
                 tier = guess
                 reasons.append(why)
+            if guess and not llm and ask and learn.audit_due(self.cfg):
+                threading.Thread(target=learn.audit, args=(msg, guess, self.cfg), daemon=True).start()
         floor = self.cfg.get("chat", {}).get("min_tier")
         if floor and higher(floor, tier) != tier:
             reasons.append(f"minimum chat {floor}")

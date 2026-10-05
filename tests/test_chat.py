@@ -1,3 +1,7 @@
+import json
+import threading
+import time
+
 from airouter import config, dispatch
 from airouter.chat import CHAT_NOTE, Chat, ClaudeTurn, CodexTurn, recap
 
@@ -241,3 +245,134 @@ def test_cancel_marks_turn_interrupted():
 
     assert c.send("apa itu LC3", runner=run) == 130
     assert c.transcript[-1][1].endswith("[dibatalkan]")
+
+
+def test_short_sentence_switches_model():
+    c = catalog_chat()
+    assert c.switch_command("pakai opus") == "/model opus"
+    assert c.switch_command("Ganti ke Codex aja") == "/codex"
+    assert c.switch_command("tolong ganti model ke luna") == "/model luna"
+    assert c.switch_command("pakai auto") == "/model auto"
+    assert c.switch_command("ganti tier heavy") == "/model heavy"
+
+
+def test_ordinary_prompts_are_not_switches():
+    c = catalog_chat()
+    for msg in ("pakai pandas", "ganti nama variabel ini", "pakai opus untuk review kode ini",
+                "use it", "kenapa pakai opus?"):
+        assert c.switch_command(msg) is None, msg
+
+
+def test_switch_falls_back_to_configured_models_before_catalog_loads():
+    c = chat()
+    assert c._catalog is None
+    assert c.switch_command("pakai sonnet") == "/model sonnet"
+    assert c._catalog is None
+
+
+class FakeClaude:
+    def __init__(self):
+        import queue
+        self.events = queue.Queue()
+        self.written = []
+        self.stdin = self
+        self.stdout = iter(self.events.get, None)
+
+    def write(self, data):
+        self.written.append(data)
+
+    def flush(self):
+        pass
+
+    def poll(self):
+        return None
+
+    def emit(self, *events):
+        for ev in events:
+            self.events.put((json.dumps(ev) + "\n").encode("utf-8"))
+
+
+def fake_claude_proc():
+    from airouter.chat import ClaudeProc
+    p = ClaudeProc.__new__(ClaudeProc)
+    p.key, p.session, p.errors = ("haiku", "low"), None, []
+    p.proc = FakeClaude()
+    p.lock, p.active, p.sent, p.acked = threading.Lock(), False, 0, 0
+    return p
+
+
+def text_event(text):
+    return {"type": "stream_event", "event": {"type": "content_block_delta",
+                                              "delta": {"type": "text_delta", "text": text}}}
+
+
+REPLAY = {"type": "user", "isReplay": True, "message": {"role": "user", "content": []}}
+RESULT = {"type": "result", "is_error": False, "usage": {}}
+
+
+def _ask_in_thread(p):
+    turn, out = ClaudeTurn(), {}
+    worker = threading.Thread(target=lambda: out.update(code=p.ask("pertama", turn, lambda *a: None)))
+    worker.start()
+    return turn, out, worker
+
+
+def test_message_injected_mid_turn_joins_the_same_answer():
+    p = fake_claude_proc()
+    turn, out, worker = _ask_in_thread(p)
+    p.proc.emit(REPLAY, text_event("ALPHA "))
+    time.sleep(0.1)
+    assert p.inject("kedua")
+    p.proc.emit(REPLAY, text_event("BRAVO"), RESULT)
+    worker.join(2)
+    assert out["code"] == 0 and turn.text() == "ALPHA BRAVO" and len(p.proc.written) == 2
+    assert not p.inject("terlambat")
+
+
+def test_message_taken_in_after_result_is_read_as_its_own_turn():
+    p = fake_claude_proc()
+    turn, out, worker = _ask_in_thread(p)
+    p.proc.emit(REPLAY, text_event("ALPHA"))
+    time.sleep(0.1)
+    assert p.inject("kedua")
+    p.proc.emit(RESULT)
+    time.sleep(0.1)
+    assert worker.is_alive()
+    p.proc.emit(REPLAY, text_event(" BRAVO"), RESULT)
+    worker.join(2)
+    assert out["code"] == 0 and turn.text() == "ALPHA BRAVO"
+
+
+def test_inject_needs_a_running_claude_turn():
+    c = chat()
+    assert not c.inject("halo")
+    p = fake_claude_proc()
+    c._claude = p
+    assert not c.inject("halo")
+
+
+def test_sentence_moves_tier_down_or_up_on_the_named_provider():
+    c = catalog_chat()
+    c.tier, c.provider = "heavy", "claude"
+    light, medium = CFG["tiers"]["light"]["codex"]["model"], CFG["tiers"]["medium"]["codex"]["model"]
+    assert c.switch_command("aku mau ganti model yg lebih ringan, tp punya codex/") == f"/codex {medium}"
+    assert c.switch_command("pakai model codex yang paling ringan") == f"/codex {light}"
+    assert c.switch_command("turunin modelnya dong") == f"/claude {CFG['tiers']['medium']['claude']['model']}"
+    c.tier = "light"
+    assert c.switch_command("naikin model") == f"/claude {CFG['tiers']['medium']['claude']['model']}"
+
+
+def test_sentence_naming_a_model_or_provider_pins_it():
+    c = catalog_chat()
+    assert c.switch_command("coba ganti ke model gpt-5.6-luna ya") == "/model gpt-5.6-luna"
+    assert c.switch_command("aku mau pindah ke codex sekarang") == "/codex"
+
+
+def test_sentences_about_other_things_are_not_switches():
+    c = catalog_chat()
+    for msg in ("kenapa kamu memindah kan modelnya skrg ke opus claude?",
+                "pakai model yang lebih ringan untuk embedding classifier",
+                "ganti warna kursornya jadi lebih terang",
+                "apa bedanya model codex dan claude?",
+                "tolong ubah fungsi ini supaya lebih ringan"):
+        assert c.switch_command(msg) is None, msg

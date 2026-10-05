@@ -20,7 +20,7 @@ from .chat import HELP, Chat
 PICKER_ORDER = ("gemini", "copilot", "codex", "claude")
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 PACKAGE = Path(__file__).parent
-MODULES = ("config", "classify", "journal", "attach", "embed", "dispatch", "learn", "chat", "tui")
+MODULES = ("config", "classify", "journal", "attach", "embed", "dispatch", "learn", "codex", "chat", "tui")
 
 
 def _watched() -> list[Path]:
@@ -78,7 +78,15 @@ Screen .screen--selection { background: #264F78; }
 #cwd { width: 1fr; color: #9D9D9D; padding: 0 2; }
 #model { width: auto; color: #CCCCCC; padding: 0 1; }
 #model:hover { background: #2B2B2B; }
-#log { padding: 0 2 1 2; background: ansi_default; }
+#body { height: 1fr; background: ansi_default; }
+#sticky { display: none; height: 1; padding: 0 0 0 2; background: ansi_default; }
+#sticky .who { width: auto; color: #CCCCCC; text-style: bold; }
+#sticky .why { width: auto; color: #6E7681; }
+#log { height: 1fr; padding: 0 0 0 2; background: ansi_default; scrollbar-size-vertical: 1; }
+#log > * { margin-right: 2; }
+.arrows { height: 1; align: right top; background: ansi_default; }
+ScrollButton { width: 1; height: 1; color: #9D9D9D; background: ansi_default; }
+ScrollButton:hover { color: #FFFFFF; background: #2B2B2B; }
 UserBubble { margin: 1 0 0 0; padding: 0 1; background: #262626; }
 UserBubble.queued { color: #6E7681; }
 Reply { height: auto; margin: 1 0 0 0; }
@@ -99,6 +107,7 @@ Info { color: #6E7681; text-style: italic; margin: 1 0 0 0; }
 Composer { width: 1fr; height: auto; min-height: 1; max-height: 10; background: ansi_default; color: #CCCCCC; border: none; padding: 0; }
 Composer:focus { border: none; }
 Composer .text-area--selection { background: #264F78; }
+Composer .text-area--cursor { color: #1F1F1F; background: #CCCCCC; text-style: none; }
 ModelPicker { align: center middle; background: #000000 50%; }
 #picker { width: 64; height: 90%; border: round #454545; background: #202020; padding: 0 2; }
 #picker-title { color: #CCCCCC; text-style: bold; margin: 1 0; }
@@ -194,6 +203,9 @@ class Composer(TextArea):
             super().__init__()
             self.text = text
 
+    def on_mount(self):
+        self.cursor_blink = False
+
     def action_select_everything(self):
         if self.text:
             self.select_all()
@@ -251,6 +263,37 @@ class ModelChip(Static):
 class AttachButton(Static):
     def on_click(self):
         self.app.pick_files()
+
+
+class ScrollButton(Static):
+    STEP = 3
+
+    def __init__(self, label: str, direction: int, **kwargs):
+        super().__init__(label, **kwargs)
+        self.direction = direction
+        self.timers = []
+
+    def on_mouse_down(self, event):
+        event.stop()
+        self.capture_mouse()
+        self.step()
+        self.timers.append(self.set_timer(0.35, self.repeat))
+
+    def repeat(self):
+        self.timers.append(self.set_interval(0.05, self.step))
+
+    def on_mouse_up(self, event):
+        event.stop()
+        self.release_mouse()
+        self.halt()
+
+    def halt(self):
+        for timer in self.timers:
+            timer.stop()
+        self.timers = []
+
+    def step(self):
+        self.app.query_one("#log", VerticalScroll).scroll_relative(y=self.direction * self.STEP, animate=False)
 
 
 class ModelPicker(ModalScreen):
@@ -356,10 +399,13 @@ class ChatApp(App):
         self.restored = bool(state)
         if state:
             self.chat.restore(state)
+        carry = (state or {}).get("carry") or {}
+        self.draft = carry.get("draft", "")
+        self.pending = list(carry.get("queue", []))
         self.reply = None
         self.busy = False
         self.queue = []
-        self.attachments = []
+        self.attachments = list(carry.get("attachments", []))
         self.picking = False
         self.stamp = _stamp()
 
@@ -368,7 +414,15 @@ class ChatApp(App):
             yield Static("✻ ai", id="brand")
             yield Static(os.getcwd(), id="cwd", markup=False)
             yield ModelChip("", id="model", markup=False)
-        yield VerticalScroll(id="log")
+        with Vertical(id="body"):
+            with Horizontal(classes="arrows"):
+                yield ScrollButton("▲", -1, id="up")
+            with Horizontal(id="sticky"):
+                yield Static("", classes="who", id="sticky-who", markup=False)
+                yield Static("", classes="why", id="sticky-why", markup=False)
+            yield VerticalScroll(id="log")
+            with Horizontal(classes="arrows"):
+                yield ScrollButton("▼", 1, id="down")
         with Vertical(id="bottom"):
             yield Static("", id="files", markup=False)
             with Horizontal(id="inputrow"):
@@ -390,26 +444,47 @@ class ChatApp(App):
             self.add_info("Edit dan perintah dijalankan otomatis (mode auto). "
                           "Ctrl+O ganti model · Esc hentikan jawaban · /help perintah")
         self.refresh_status()
-        self.query_one(Composer).focus()
+        composer = self.query_one(Composer)
+        if self.draft:
+            composer.text = self.draft
+            composer.move_cursor(composer.document.end)
+        if self.attachments:
+            self.refresh_files()
+        composer.focus()
+        if self.pending:
+            self.queue = [(text, self._bubble(text, files, queued=True), files) for text, files in self.pending]
+            self.call_after_refresh(self.after_send)
         self.warm_catalog()
         self.warm_classifier()
         self.chat.prewarm()
         self.set_interval(2, self.check_code)
+        self.set_interval(0.1, self.inject_queued)
+        self.set_interval(0.1, self.refresh_sticky)
 
     def on_unmount(self):
         self.chat.close()
 
-    def check_code(self):
-        if self.busy or isinstance(self.screen, ModalScreen):
-            return
+    def code_changed(self) -> bool:
+        if isinstance(self.screen, ModalScreen):
+            return False
         stamp = _stamp()
         if stamp == self.stamp:
-            return
+            return False
         self.stamp = stamp
         problem = _broken()
         if problem:
             self.notify(f"Kode berubah tapi belum valid, belum dimuat ulang: {problem}", severity="warning")
-            return
+            return False
+        return True
+
+    def check_code(self):
+        if not self.busy and self.code_changed():
+            self.reload()
+
+    def reload(self):
+        self.busy = True
+        self.chat.carry = {"draft": self.query_one(Composer).text, "attachments": list(self.attachments),
+                           "queue": [(text, list(files)) for text, _, files in self.queue]}
         self.exit("reload")
 
     @work(thread=True)
@@ -423,7 +498,27 @@ class ChatApp(App):
 
     def refresh_status(self):
         queued = f"  ·  antre {len(self.queue)}" if self.queue else ""
-        self.query_one("#model", Static).update(f"◆ {self.chat.label()} ▾{queued}")
+        model = self.reply.model if self.busy and self.reply else self.chat.label()
+        self.query_one("#model", Static).update(f"◆ {model} ▾{queued}")
+
+    def refresh_sticky(self):
+        logs = self.query("#log")
+        stickies = self.query("#sticky")
+        if not logs or not stickies:
+            return
+        log = logs[0]
+        top = log.content_region.y
+        visible = next((reply for reply in reversed(list(log.query(Reply)))
+                        if reply.region.y < top < reply.region.bottom), None)
+        sticky = stickies[0]
+        was_at_end = log.max_scroll_y - log.scroll_y <= 1
+        changed = sticky.display != (visible is not None)
+        sticky.display = visible is not None
+        if changed and was_at_end:
+            self.call_after_refresh(log.scroll_end, animate=False)
+        if visible:
+            self.query_one("#sticky-who", Static).update(visible.query_one(".who", Static).render())
+            self.query_one("#sticky-why", Static).update(visible.query_one(".why", Static).render())
 
     def _mount(self, widget):
         log = self.query_one("#log", VerticalScroll)
@@ -443,6 +538,7 @@ class ChatApp(App):
     def start_reply(self, model: str, why: str):
         self.reply = Reply(model, why)
         self._mount(self.reply)
+        self.refresh_status()
 
     def reply_show(self, kind: str, text: str):
         if not self.reply:
@@ -464,6 +560,7 @@ class ChatApp(App):
     @on(Composer.Submitted)
     def submitted(self, event: Composer.Submitted):
         text = event.text.strip()
+        text = self.chat.switch_command(text) or text
         files = [] if text.startswith("/") else list(self.attachments)
         if not text and not files:
             return
@@ -473,11 +570,36 @@ class ChatApp(App):
             self.attachments = []
             self.refresh_files()
         if self.busy:
+            if not text.startswith("/") and self.chat.inject(text, files):
+                self.continue_reply(text, files)
+                return
             bubble = None if text.startswith("/") else self._bubble(text, files, queued=True)
             self.queue.append((text, bubble, files))
             self.refresh_status()
             return
         self.dispatch_input(text, None, files)
+
+    def continue_reply(self, text: str, files=(), bubble: UserBubble | None = None):
+        old = self.reply
+        if old:
+            old.finish("●", "")
+        if bubble:
+            bubble.remove_class("queued")
+        else:
+            self._bubble(text, files)
+        if old:
+            self.start_reply(old.model, old.why)
+
+    def inject_queued(self):
+        if not self.busy:
+            return
+        while self.queue:
+            text, bubble, files = self.queue[0]
+            if text.startswith("/") or not self.chat.inject(text, files):
+                return
+            self.queue.pop(0)
+            self.continue_reply(text, files, bubble)
+            self.refresh_status()
 
     def _bubble(self, text: str, files=(), queued: bool = False) -> UserBubble:
         shown = text + ("\n" + attach.describe(files) if files else "")
@@ -489,6 +611,10 @@ class ChatApp(App):
         if text.startswith("/"):
             self.run_command(text)
             return False
+        if self.code_changed():
+            self.queue.insert(0, (text, bubble, files))
+            self.reload()
+            return True
         if bubble:
             bubble.remove_class("queued")
         else:
@@ -555,7 +681,7 @@ class ChatApp(App):
         elif name == "/help":
             self.add_info(HELP)
         elif name == "/reload":
-            self.exit("reload")
+            self.reload()
         else:
             self.chat.command(text)
             self.refresh_status()

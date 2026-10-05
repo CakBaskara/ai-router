@@ -62,6 +62,10 @@ and from you: switching the model after an answer counts as a correction.
 
 - In the chat, edits and commands run without asking. Each CLI's own safety settings still
   apply.
+- Messages sent while Claude or Codex is replying join the active work. A message arriving
+  after the turn has ended starts a follow-up reply. Model-switch commands take effect between turns.
+- Claude and Codex chat sessions include the current project and the ai-router installation folder as writable
+  locations. Restart a session to pick up changes to its directory permissions.
 - Free is slower: Claude takes about 2 s, Codex 5 s, Copilot up to 37 s, Gemini up to 50 s.
 - Settings live in `airouter/config.toml`. Every route is logged to `logs/routes.jsonl`.
 

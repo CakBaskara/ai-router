@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -9,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import attach, dispatch, learn
+from .codex import CodexProc
 from .classify import TIERS, classify
 from .journal import log, say, usage_today
 
@@ -21,7 +23,9 @@ HELP = (
     "/model 3  /model sol      pilih model dari daftar (nomor atau nama)\n"
     "/claude /codex /gemini /copilot  kunci provider\n"
     "/codex gpt-5.6-sol        kunci provider dan model persis\n"
-    "/exit                    keluar\n"
+    "pakai opus  ganti ke codex  pakai auto   sama seperti /model dan /<provider>\n"
+    "ganti model yang lebih ringan punya codex  turun/naik satu tier, boleh sebut provider\n"
+    "/exit                   keluar\n"
     "Baris diakhiri \\ untuk lanjut ke baris berikutnya; teks yang di-paste ikut terkirim utuh."
 )
 CHAT_NOTE = (
@@ -29,13 +33,26 @@ CHAT_NOTE = (
     "that routes each message to Claude Code, Codex, Gemini or Copilot CLI and picks the model automatically. "
     "Other assistants may have answered earlier turns; treat their answers as part of this conversation. You cannot switch "
     "models yourself. If the user wants another model, tell them to type /models for the list, /model <number or "
-    "name> to pick one, or /model auto to go back to automatic routing; /new starts a new conversation. "
+    "name> to pick one, or /model auto to go back to automatic routing; a short message such as \"pakai opus\" or "
+    "\"ganti ke codex\" does the same. /new starts a new conversation. "
     "Answer naturally, like a helpful colleague, not curtly.\n\n"
 )
 STATE = ("tier", "provider", "model", "sessions", "synced", "transcript",
          "pinned_provider", "pinned_tier", "pinned_model")
 RECAP_ENTRIES = 12
 RECAP_CHARS = 2000
+SWITCH = re.compile(
+    r"(?:tolong |coba |please )?(?:ganti|ubah|pindah|pakai|pake|gunakan|switch|use|change)"
+    r"(?: (?:model|provider|tier))?(?: (?:ke|jadi|to))? (\S+)(?: (?:aja|saja|dong|ya|deh|lagi))?[.!]?"
+)
+SWITCH_VERB = re.compile(r"\b(?:ganti|ubah|pindah|pakai|pake|gunakan|switch|use|change|naik\w*|turun\w*)\b")
+NOT_SWITCH = re.compile(r"^(?:kenapa|mengapa|why|apa|apakah|bagaimana|gimana|how|what)\b|\b(?:untuk|for)\b")
+LIGHTEST = ("paling ringan", "paling murah", "termurah", "paling hemat", "lightest", "cheapest")
+STRONGEST = ("paling kuat", "paling pintar", "terkuat", "terpintar", "strongest", "smartest")
+LIGHTER = ("ringan", "murah", "hemat", "turun", "lighter", "cheaper", "smaller")
+STRONGER = ("kuat", "pintar", "berat", "naik", "stronger", "smarter", "bigger")
+BARE_STEP = re.compile(r"(?:(?:oke|ok|coba|tolong|please) )*(?:turun(?:kan|in)?|naik(?:kan|in)?)"
+                       r"(?: (?:aja|saja|dong|ya|deh))?[.!]?")
 TOOL_KEYS = ("file_path", "command", "pattern", "path", "url", "query", "description")
 
 
@@ -117,6 +134,7 @@ class CodexTurn:
         self.reply = []
         self.usage = ""
         self.error = None
+        self.streamed = set()
 
     def feed(self, ev: dict):
         kind = ev.get("type")
@@ -124,6 +142,11 @@ class CodexTurn:
         itype = item.get("type")
         if kind == "thread.started":
             self.session = ev.get("thread_id")
+        elif kind == "item.delta" and itype == "agent_message":
+            prefix = "\n\n" if item["id"] not in self.streamed and self.reply else ""
+            self.streamed.add(item["id"])
+            self.reply.append(prefix + item.get("text", ""))
+            return "text", prefix + item.get("text", "")
         elif kind == "item.started" and itype == "command_execution":
             return "note", _short(f"$ {item.get('command', '')}")
         elif kind == "item.started" and itype == "mcp_tool_call":
@@ -131,6 +154,8 @@ class CodexTurn:
         elif kind == "item.started" and itype == "web_search":
             return "note", _short(f"search {item.get('query', '')}")
         elif kind == "item.completed" and itype == "agent_message":
+            if item.get("id") in self.streamed:
+                return None
             prefix = "\n\n" if self.reply else ""
             self.reply.append(prefix + item.get("text", ""))
             return "text", prefix + item.get("text", "")
@@ -151,6 +176,26 @@ class CodexTurn:
 
     def text(self) -> str:
         return "".join(self.reply).strip()
+
+
+    def feed_app(self, method, params):
+        if method == "item/agentMessage/delta":
+            return self.feed({"type": "item.delta", "item": {"type": "agent_message",
+                              "id": params["itemId"], "text": params["delta"]}})
+        if method == "thread/tokenUsage/updated":
+            usage = params["tokenUsage"]["last"]
+            return self.feed({"type": "turn.completed", "usage": {
+                "input_tokens": usage["inputTokens"], "cached_input_tokens": usage["cachedInputTokens"],
+                "output_tokens": usage["outputTokens"]}})
+        if method in ("item/started", "item/completed"):
+            item = dict(params["item"])
+            item["type"] = {"agentMessage": "agent_message", "commandExecution": "command_execution",
+                            "mcpToolCall": "mcp_tool_call", "webSearch": "web_search",
+                            "fileChange": "file_change"}.get(item["type"], item["type"])
+            return self.feed({"type": method.replace("/", "."), "item": item})
+        if method == "error":
+            return "note", _short((params.get("error") or {}).get("message", "Codex error"), 200)
+        return None
 
 
 class GeminiTurn:
@@ -348,6 +393,9 @@ class ClaudeProc:
         cmd = dispatch.chat_cmd("claude", model, effort, session, attach_dir=str(attach.folder()))
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.errors = []
+        self.lock = threading.Lock()
+        self.active = False
+        self.sent = self.acked = 0
         threading.Thread(target=self._drain, daemon=True).start()
 
     def _drain(self):
@@ -357,29 +405,55 @@ class ClaudeProc:
     def alive(self) -> bool:
         return self.proc.poll() is None
 
-    def ask(self, prompt: str, turn, show, files=()) -> int:
+    def _write(self, prompt: str, files=()):
         content = [{"type": "text", "text": prompt}] + image_blocks(files)
         msg = {"type": "user", "message": {"role": "user", "content": content}}
+        self.proc.stdin.write((json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8"))
+        self.proc.stdin.flush()
+
+    def ask(self, prompt: str, turn, show, files=()) -> int:
         try:
-            self.proc.stdin.write((json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8"))
-            self.proc.stdin.flush()
+            with self.lock:
+                self.active, self.sent, self.acked = True, 1, 0
+                self._write(prompt, files)
             for raw in self.proc.stdout:
                 try:
                     ev = json.loads(raw.decode("utf-8", "replace"))
                 except json.JSONDecodeError:
                     continue
+                if ev.get("isReplay"):
+                    self.acked += 1
+                    continue
                 shown = turn.feed(ev)
                 if shown:
                     show(*shown)
                 if ev.get("type") == "result":
+                    # A message replayed only after this result opens a turn of its own; keep reading until
+                    # every message written during this ask has been taken in.
+                    with self.lock:
+                        if self.acked < self.sent:
+                            continue
+                        self.active = False
                     self.session = turn.session or self.session
                     return 1 if ev.get("is_error") else 0
         except (OSError, ValueError):
             pass
+        self.active = False
         code = self.proc.wait()
         if not turn.error and self.errors:
             turn.error = _short(self.errors[-1], 300)
         return code or 1
+
+    def inject(self, prompt: str, files=()) -> bool:
+        with self.lock:
+            if not self.active or not self.alive():
+                return False
+            try:
+                self._write(prompt, files)
+            except (OSError, ValueError):
+                return False
+            self.sent += 1
+            return True
 
     def close(self):
         if self.alive():
@@ -398,7 +472,12 @@ class Chat:
         self._catalog_lock = threading.Lock()
         self._proc = None
         self._claude = None
+        self._codex = None
+        self._live = None
+        self._input_lock = threading.RLock()
         self._cancelled = False
+        self.injected = []
+        self.carry = {}
         self.use_llm = use_llm and cfg["classifier"].get("llm_fallback", False)
         self.reset()
 
@@ -445,6 +524,9 @@ class Chat:
 
     def cancel(self):
         self._cancelled = True
+        if isinstance(self._live, CodexProc):
+            self._live.cancel()
+            return
         if self._proc and self._proc.poll() is None:
             self._proc.kill()
 
@@ -452,6 +534,9 @@ class Chat:
         if self._claude:
             self._claude.close()
             self._claude = None
+        if self._codex:
+            self._codex.close()
+            self._codex = None
 
     def claude_route(self, tier: str) -> dict:
         route = dict(self.cfg["tiers"][tier]["claude"])
@@ -476,20 +561,36 @@ class Chat:
 
     def _run(self, provider: str, route: dict, prompt: str, turn, runner, files=()) -> int:
         prompt = with_files(provider, prompt, files)
-        if runner or provider != "claude":
+        if runner or provider not in ("claude", "codex"):
             cmd = dispatch.chat_cmd(provider, route["model"], route["effort"], self.sessions.get(provider),
                                     files, str(attach.folder()) if files else None)
             return (runner or stream)(cmd, prompt, turn, self.ui.show, self._started)
+        if provider == "codex":
+            key, session = (route["model"], route["effort"]), self.sessions.get("codex")
+            p = self._codex
+            if not p or not p.alive() or p.key != key or p.session != session:
+                if p:
+                    p.close()
+                self._codex = p = CodexProc(*key, session)
+            with p.lock:
+                p.cancelled = False
+            self._live = p
+            self._started(p.proc)
+            return p.ask(prompt, turn, self.ui.show, files)
         p = self._claude_proc(route)
+        self._live = p
         self._started(p.proc)
         return p.ask(prompt, turn, self.ui.show, files)
 
     def send(self, msg: str, runner=None, attachments=()) -> int:
         self._cancelled = False
+        self.injected = []
         tier, reasons, llm = self.route(msg)
         providers = self.order(tier)
         code = 1
         for i, provider in enumerate(providers):
+            if self.injected:
+                msg, self.injected = "\n\n".join([msg] + self.injected), []
             route = dict(self.cfg["tiers"][tier][provider])
             if self.pinned_model and provider == self.pinned_provider:
                 route["model"] = self.pinned_model
@@ -500,7 +601,10 @@ class Chat:
                 prompt = CHAT_NOTE + prompt
             turn = TURNS[provider]()
             started = time.time()
-            code = self._run(provider, route, prompt, turn, runner, attachments)
+            try:
+                code = self._run(provider, route, prompt, turn, runner, attachments)
+            except OSError as exc:
+                turn.error, code = _short(str(exc), 300), 1
             self._proc = None
             if self._cancelled:
                 code = 130
@@ -513,7 +617,10 @@ class Chat:
                 if turn.session:
                     self.sessions[provider] = turn.session
                 reply = turn.text() + (" [dibatalkan]" if code == 130 else "")
-                said = msg + (f"\n[lampiran: {', '.join(f.name for f in attachments)}]" if attachments else "")
+                with self._input_lock:
+                    said = "\n\n".join([msg] + self.injected)
+                    self.injected = []
+                said += f"\n[lampiran: {', '.join(f.name for f in attachments)}]" if attachments else ""
                 self.transcript += [("User", said), ("Assistant", reply)]
                 self.synced[provider] = len(self.transcript)
                 self.provider, self.tier, self.model = provider, tier, route["model"]
@@ -524,7 +631,21 @@ class Chat:
                 return code
             fallback = providers[i + 1] if i < len(providers) - 1 else None
             self.ui.failed(provider, code, turn.error, fallback)
+        with self._input_lock:
+            said = "\n\n".join([msg] + self.injected)
+            self.injected = []
+        said += f"\n[lampiran: {', '.join(f.name for f in attachments)}]" if attachments else ""
+        self.transcript += [("User", said), ("Assistant", f"[gagal: {turn.error or code}]")]
         return code
+
+    def inject(self, msg: str, files=()) -> bool:
+        with self._input_lock:
+            p = self._live
+            content = with_files("codex" if isinstance(p, CodexProc) else "claude", msg, files)
+            if not p or self._proc is not p.proc or not p.inject(content, files):
+                return False
+            self.injected.append(content)
+            return True
 
     def _log(self, msg, tier, reasons, llm, provider, route, code, seconds, session):
         log({
@@ -548,7 +669,7 @@ class Chat:
         return self.pinned_model or self.model or "auto"
 
     def snapshot(self) -> dict:
-        return {k: getattr(self, k) for k in STATE}
+        return {**{k: getattr(self, k) for k in STATE}, "carry": self.carry}
 
     def restore(self, state: dict):
         for k in STATE:
@@ -604,6 +725,65 @@ class Chat:
         return (f"tier {self.pinned_tier or self.tier or '-'}{' (dikunci)' if self.pinned_tier else ''}"
                 f" · provider {self.pinned_provider or self.provider or '-'}"
                 f"{' (dikunci)' if self.pinned_provider else ''} · model {self.label()}")
+
+    def switch_command(self, msg: str) -> str | None:
+        text = " ".join(msg.lower().split())
+        match = SWITCH.fullmatch(text)
+        if not match:
+            return self._switch_sentence(text)
+        target = match.group(1)
+        if target in ("auto", "otomatis"):
+            return "/model auto"
+        if target in TIERS:
+            return f"/model {target}"
+        if target in self.cfg["providers"]:
+            return f"/{target}"
+        listed = self._catalog or [(p, m) for p, models in self.cfg.get("models", {}).items() for m in models]
+        names = [m.lower() for _, m in listed]
+        if target in names or (len(target) >= 3 and any(target in m for m in names)):
+            return f"/model {target}"
+        return self._switch_sentence(text)
+
+    def _switch_sentence(self, text: str) -> str | None:
+        if len(text.split()) > 14 or NOT_SWITCH.search(text):
+            return None
+        if not (SWITCH_VERB.search(text) or self._says(text, LIGHTER + STRONGER)):
+            return None
+        providers = [p for p in self.cfg["providers"] if re.search(rf"\b{p}\b", text)]
+        listed = self._catalog or [(p, m) for p, models in self.cfg.get("models", {}).items() for m in models]
+        named = [m for _, m in listed
+                 if len(m) >= 4 and re.search(rf"(?<![\w.-]){re.escape(m.lower())}(?![\w.-])", text)]
+        bare_step = (self.pinned_provider or self.provider) and BARE_STEP.fullmatch(text)
+        if not (providers or named or re.search(r"\bmodel", text) or bare_step):
+            return None
+        if named:
+            return f"/model {named[0]}"
+        current = self.pinned_tier or self.tier or "medium"
+        if self.pinned_provider and self.pinned_model:
+            current = learn.tier_of(self.cfg, self.pinned_provider, self.pinned_model) or current
+        step = TIERS.index(current)
+        if self._says(text, LIGHTEST):
+            tier = TIERS[0]
+        elif self._says(text, STRONGEST):
+            tier = TIERS[-1]
+        elif self._says(text, LIGHTER):
+            tier = TIERS[max(step - 1, 0)]
+        elif self._says(text, STRONGER):
+            tier = TIERS[min(step + 1, len(TIERS) - 1)]
+        else:
+            tier = next((t for t in TIERS if re.search(rf"\b{t}\b", text)), None)
+        provider = providers[0] if providers else self.pinned_provider or self.provider
+        if tier and provider:
+            return f"/{provider} {self.cfg['tiers'][tier][provider]['model']}"
+        if tier:
+            return f"/model {tier}"
+        if providers:
+            return f"/{providers[0]}"
+        return None
+
+    @staticmethod
+    def _says(text: str, words) -> bool:
+        return any(re.search(r"(?<!\w)" + re.escape(w), text) for w in words)
 
     def list_models(self):
         current = self.label()
@@ -683,6 +863,7 @@ def _loop(chat: Chat) -> int:
             continue
         if not msg:
             continue
+        msg = chat.switch_command(msg) or msg
         if msg.startswith("/"):
             if not chat.command(msg):
                 return 0

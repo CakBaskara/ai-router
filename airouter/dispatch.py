@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import attach
+from . import attach, config
 
 CLASSIFIER_PROMPT = (
     "Classify the user's request by how capable a model must be to answer it well. "
@@ -111,6 +111,19 @@ def build(provider: str, model: str, effort: str, prompt: str, interactive: bool
     raise ValueError(f"unknown provider: {provider}")
 
 
+def chat_roots(attach_dir=None):
+    roots = [str(config.REPO_ROOT.resolve())]
+    if attach_dir:
+        roots.append(str(Path(attach_dir).resolve()))
+    return list(dict.fromkeys(roots))
+
+
+def codex_server_cmd():
+    roots = json.dumps(chat_roots(str(attach.folder())))
+    return codex_cmd() + ["app-server", "--listen", "stdio://", "-c", 'sandbox_mode="workspace-write"',
+                          "-c", f"sandbox_workspace_write.writable_roots={roots}"]
+
+
 def chat_cmd(provider: str, model: str, effort: str, session: str | None, files=(),
              attach_dir: str | None = None) -> list[str]:
     images = [str(f) for f in files if attach.is_image(Path(f))]
@@ -118,12 +131,14 @@ def chat_cmd(provider: str, model: str, effort: str, session: str | None, files=
         cmd = claude_cmd() + [
             "-p", "--model", model, "--effort", effort, "--permission-mode", "auto",
             "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-            "--include-partial-messages"]
-        cmd += ["--add-dir", attach_dir] if attach_dir else []
+            "--include-partial-messages", "--replay-user-messages"]
+        cmd += [arg for root in chat_roots(attach_dir) for arg in ("--add-dir", root)]
         return cmd + (["--resume", session] if session else [])
     if provider == "codex":
         common = ["-m", model, "-c", f"model_reasoning_effort={effort}", "--json", "--skip-git-repo-check"]
         common += [arg for img in images for arg in ("-i", img)]
+        roots = json.dumps(chat_roots(attach_dir))
+        common += ["-c", f"sandbox_workspace_write.writable_roots={roots}"]
         if session:
             return codex_cmd() + ["exec", "resume"] + common + ["-c", 'sandbox_mode="workspace-write"', session, "-"]
         return codex_cmd() + ["exec"] + common + ["-s", "workspace-write", "-"]

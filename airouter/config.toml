@@ -56,7 +56,7 @@ heavy = [
     "memory leak", "bocor", "optimasi", "optimi", "performa", "performance",
     "migrasi", "migrate", "audit", "analisa", "analisis", "analy",
     "security", "keamanan", "concurrency", "algoritma", "algorithm",
-    "kenapa", "mengapa", "why", "trade-off", "tradeoff", "strategi",
+    "trade-off", "tradeoff", "strategi",
 ]
 medium = [
     "debug", "bug", "error", "crash", "gagal", "fail", "exception", "traceback",

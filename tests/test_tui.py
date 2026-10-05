@@ -4,7 +4,9 @@ from textual.widgets import Markdown
 
 from airouter import config
 from airouter.chat import Chat
-from airouter.tui import ChatApp, Composer, ModelPicker, Reply, UserBubble
+from textual.containers import VerticalScroll
+
+from airouter.tui import ChatApp, Composer, ModelPicker, Reply, ScrollButton, UserBubble
 
 CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing")}, "providers": ["claude", "codex"]}
 
@@ -241,4 +243,197 @@ def test_picker_scrolls_to_last_model_on_short_terminal():
             await pilot.press("enter")
             await pilot.pause()
             assert app.chat.pinned_model == "model-39"
+    asyncio.run(go())
+
+
+def test_sentence_switch_pins_model_without_sending():
+    async def go():
+        app = make_app()
+        async with app.run_test(size=(100, 32)) as pilot:
+            await _type_and_send(pilot, "pakai sonnet")
+            assert (app.chat.pinned_provider, app.chat.pinned_model) == ("claude", "sonnet")
+            assert not app.query(UserBubble)
+            assert not app.query(Reply)
+    asyncio.run(go())
+
+
+def test_composer_cursor_is_steady():
+    async def go():
+        app = make_app()
+        async with app.run_test(size=(100, 32)) as pilot:
+            await pilot.pause()
+            assert app.query_one(Composer).cursor_blink is False
+    asyncio.run(go())
+
+
+def test_scroll_buttons_move_the_log():
+    async def go():
+        app = make_app()
+        async with app.run_test(size=(100, 20)) as pilot:
+            for i in range(40):
+                app.add_info(f"baris {i}")
+            await pilot.pause(0.2)
+            log = app.query_one("#log", VerticalScroll)
+            log.scroll_end(animate=False)
+            await pilot.pause(0.1)
+            bottom = log.scroll_y
+            assert bottom > 0
+            await pilot.click("#up")
+            await pilot.pause(0.1)
+            assert log.scroll_y == bottom - ScrollButton.STEP
+            await pilot.click("#down")
+            await pilot.pause(0.1)
+            assert log.scroll_y == bottom
+    asyncio.run(go())
+
+
+def test_long_reply_keeps_running_and_finished_status_visible():
+    async def go():
+        app = make_app()
+        async with app.run_test(size=(80, 20)) as pilot:
+            app.start_reply("gpt-6-sol", "codex · medium · medium")
+            await pilot.pause()
+            app.reply_show("text", "\n\n".join(f"baris {i}" for i in range(40)))
+            await pilot.pause(0.2)
+            log = app.query_one("#log", VerticalScroll)
+            log.scroll_end(animate=False)
+            for _ in range(20):
+                await pilot.pause(0.05)
+                if app.query_one("#sticky").display:
+                    break
+            sticky = app.query_one("#sticky")
+            assert sticky.display
+            assert "gpt-6-sol" in str(app.query_one("#sticky-who").render())
+            assert "codex · medium · medium" in str(app.query_one("#sticky-why").render())
+            app.end_reply("●", "✓", False)
+            await pilot.pause(0.2)
+            assert str(app.query_one("#sticky-who").render()).startswith("●")
+            log.scroll_home(animate=False)
+            await pilot.pause(0.2)
+            assert not sticky.display
+
+    asyncio.run(go())
+
+
+def test_reload_keeps_unsent_draft():
+    async def go():
+        app = make_app()
+        async with app.run_test(size=(100, 32)) as pilot:
+            app.query_one(Composer).insert("prompt yang belum dikirim")
+            app.stamp = ()
+            app.check_code()
+            await pilot.pause()
+        assert app.return_value == "reload"
+        state = app.chat.snapshot()
+        again = ChatApp(CFG, None, None, False, state)
+        again.chat.prewarm = lambda: None
+        again.chat._catalog = app.chat._catalog
+        async with again.run_test(size=(100, 32)) as pilot:
+            await pilot.pause()
+            assert again.query_one(Composer).text == "prompt yang belum dikirim"
+    asyncio.run(go())
+
+
+def test_prompt_sent_while_claude_answers_is_injected_not_queued():
+    async def go():
+        app = make_app()
+        release = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        injected = []
+
+        def slow(text, attachments=()):
+            app.call_from_thread(app.start_reply, "opus", "claude · heavy · high")
+            asyncio.run_coroutine_threadsafe(release.wait(), loop).result()
+            app.call_from_thread(app.end_reply, "●", "✓", False)
+            return 0
+
+        app.chat.send = slow
+        app.chat.inject = lambda text, files=(): injected.append(text) or True
+        async with app.run_test(size=(100, 32)) as pilot:
+            app.query_one(Composer).insert("pertama")
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            app.query_one(Composer).insert("kedua")
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert injected == ["kedua"] and not app.queue
+            assert not app.query(UserBubble)[-1].has_class("queued")
+            assert len(app.query(Reply)) == 2
+            release.set()
+            for _ in range(40):
+                await pilot.pause(0.05)
+                if not app.busy:
+                    break
+            assert not app.busy
+    asyncio.run(go())
+
+
+def test_prompt_queued_during_startup_joins_active_reply():
+    async def go():
+        app = make_app()
+        release = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        ready = False
+        injected = []
+
+        def slow(text, attachments=()):
+            app.call_from_thread(app.start_reply, "opus", "claude · heavy · high")
+            asyncio.run_coroutine_threadsafe(release.wait(), loop).result()
+            app.call_from_thread(app.end_reply, "●", "✓", False)
+            return 0
+
+        app.chat.send = slow
+
+        def inject(text, files=()):
+            if not ready:
+                return False
+            injected.append(text)
+            return True
+
+        app.chat.inject = inject
+        async with app.run_test(size=(100, 32)) as pilot:
+            await _type_and_send(pilot, "pertama")
+            await _type_and_send(pilot, "kedua")
+            assert len(app.queue) == 1
+            assert app.query(UserBubble)[-1].has_class("queued")
+            ready = True
+            for _ in range(20):
+                await pilot.pause(0.05)
+                if injected:
+                    break
+            assert injected == ["kedua"]
+            assert not app.queue
+            assert not app.query(UserBubble)[-1].has_class("queued")
+            release.set()
+            for _ in range(40):
+                await pilot.pause(0.05)
+                if not app.busy:
+                    break
+            assert not app.busy
+
+    asyncio.run(go())
+
+
+def test_changed_code_reloads_between_back_to_back_prompts_and_keeps_the_next_one():
+    async def go():
+        app = make_app()
+        async with app.run_test(size=(100, 32)) as pilot:
+            app.stamp = ()
+            app.query_one(Composer).insert("prompt berikutnya")
+            await pilot.press("enter")
+            await pilot.pause()
+        assert app.return_value == "reload"
+        state = app.chat.snapshot()
+        assert state["carry"]["queue"] == [("prompt berikutnya", [])]
+        again = ChatApp(CFG, None, None, False, state)
+        again.chat.prewarm = lambda: None
+        again.chat._catalog = app.chat._catalog
+        again.chat.send = lambda text, attachments=(): Chat.send(again.chat, text, runner=fake_runner)
+        async with again.run_test(size=(100, 32)) as pilot:
+            for _ in range(50):
+                await pilot.pause(0.05)
+                if again.query(Reply) and not again.busy:
+                    break
+            assert again.chat.transcript[-2] == ("User", "prompt berikutnya")
+            assert not again.queue
     asyncio.run(go())

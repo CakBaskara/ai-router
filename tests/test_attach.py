@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 
 from PIL import Image
 
@@ -77,7 +78,7 @@ def test_cmd_flags_per_provider(tmp_path):
     gemini = dispatch.chat_cmd("gemini", "g", "low", None, [img], "D:/att")
     assert gemini[gemini.index("--include-directories") + 1] == "D:/att"
     claude = dispatch.chat_cmd("claude", "opus", "high", None, attach_dir="D:/att")
-    assert claude[claude.index("--add-dir") + 1] == "D:/att"
+    assert str(Path("D:/att").resolve()) in claude
 
 
 def test_send_passes_attachments_and_notes_them_in_recap(tmp_path):

@@ -299,10 +299,10 @@ def test_long_reply_keeps_running_and_finished_status_visible():
             log.scroll_end(animate=False)
             for _ in range(20):
                 await pilot.pause(0.05)
-                if app.query_one("#sticky").display:
+                if app.query_one("#sticky").visible:
                     break
             sticky = app.query_one("#sticky")
-            assert sticky.display
+            assert sticky.visible
             assert "gpt-6-sol" in str(app.query_one("#sticky-who").render())
             assert "codex · medium · medium" in str(app.query_one("#sticky-why").render())
             app.end_reply("●", "✓", False)
@@ -310,7 +310,7 @@ def test_long_reply_keeps_running_and_finished_status_visible():
             assert str(app.query_one("#sticky-who").render()).startswith("●")
             log.scroll_home(animate=False)
             await pilot.pause(0.2)
-            assert not sticky.display
+            assert not sticky.visible
 
     asyncio.run(go())
 
@@ -483,4 +483,25 @@ def test_streaming_reply_follows_until_user_scrolls_up():
                 await app.reply_show("text", f"lagi {i}\n\n")
             await pilot.pause(0.2)
             assert log.scroll_y == log.max_scroll_y
+    asyncio.run(go())
+
+
+
+def test_bottom_of_log_holds_still_while_header_sticks():
+    async def go():
+        app = make_app()
+        async with app.run_test(size=(80, 20)) as pilot:
+            app.start_reply("sonnet", "claude · medium")
+            await pilot.pause()
+            await app.reply_show("text", "\n\n".join(f"b {i}" for i in range(30)))
+            app.end_reply("●", "", False)
+            for i in range(13):
+                app.add_info(f"info {i}")
+            await pilot.pause(0.4)
+            log = app.query_one("#log", VerticalScroll)
+            seen = set()
+            for _ in range(12):
+                await pilot.pause(0.1)
+                seen.add((log.scroll_y, log.size.height))
+            assert len(seen) == 1 and log.scroll_y == log.max_scroll_y
     asyncio.run(go())

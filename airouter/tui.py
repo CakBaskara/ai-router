@@ -79,7 +79,7 @@ Screen .screen--selection { background: #264F78; }
 #model { width: auto; color: #CCCCCC; padding: 0 1; }
 #model:hover { background: #2B2B2B; }
 #body { height: 1fr; background: ansi_default; }
-#sticky { display: none; height: 1; padding: 0 0 0 2; background: ansi_default; }
+#sticky { visibility: hidden; height: 1; padding: 0 0 0 2; background: ansi_default; }
 #sticky .who { width: auto; color: #CCCCCC; text-style: bold; }
 #sticky .why { width: auto; color: #6E7681; }
 #log { height: 1fr; padding: 0 0 0 2; background: ansi_default; scrollbar-size-vertical: 1; }
@@ -530,15 +530,11 @@ class ChatApp(App):
         top = log.content_region.y
         visible = next((reply for reply in reversed(list(log.query(Reply)))
                         if reply.region.y < top < reply.region.bottom), None)
-        sticky = stickies[0]
-        was_at_end = log.max_scroll_y - log.scroll_y <= 1
-        changed = sticky.display != (visible is not None)
-        sticky.display = visible is not None
-        if changed and was_at_end:
-            self.call_after_refresh(log.scroll_end, animate=False)
+        stickies[0].visible = visible is not None
         if visible:
-            self.query_one("#sticky-who", Static).update(visible.query_one(".who", Static).render())
-            self.query_one("#sticky-why", Static).update(visible.query_one(".why", Static).render())
+            for target, source in (("#sticky-who", ".who"), ("#sticky-why", ".why")):
+                for widget in self.query(target):
+                    widget.update(visible.query_one(source, Static).render())
 
     def _mount(self, widget):
         self.query_one("#log", VerticalScroll).mount(widget)

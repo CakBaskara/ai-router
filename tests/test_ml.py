@@ -116,3 +116,18 @@ def test_audit_rate_from_config():
     random.seed(1)
     hits = sum(learn.audit_due({"classifier": {"audit_rate": 0.1}}) for _ in range(1000))
     assert 60 < hits < 140
+
+
+def test_vector_cache_survives_restart():
+    class Disk(embed.Encoder):
+        def __init__(self):
+            self.encoded = 0
+
+        def __call__(self, texts):
+            self.encoded += len(texts)
+            return fake_encoder(texts)
+
+    first, second = Disk(), Disk()
+    embed.vectors(["halo apa kabar"], first)
+    embed.vectors(["halo apa kabar"], second)
+    assert (first.encoded, second.encoded) == (1, 0)

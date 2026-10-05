@@ -15,6 +15,7 @@ _lock = threading.Lock()
 _encoder = None
 _failed = None
 _vectors = {}
+_CACHE_SAVE_BATCH = 64
 
 
 def folder() -> Path:
@@ -99,6 +100,17 @@ def cache_path() -> Path:
     return Path(os.environ.get("AI_ROUTER_LABELS", config.REPO_ROOT / "logs" / "labels.jsonl")).with_name("ml_vectors.npz")
 
 
+def _save_vectors(cache: dict[str, object], path: Path):
+    import numpy as np
+    if not cache:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(path, keys=np.array(list(cache.keys())), vecs=np.stack(list(cache.values())))
+    except (OSError, ValueError):
+        pass
+
+
 def vectors(texts: list[str], encoder):
     import numpy as np
     disk = isinstance(encoder, Encoder)
@@ -111,12 +123,10 @@ def vectors(texts: list[str], encoder):
             pass
     keys = [_key(t) for t in texts]
     missing = list(dict.fromkeys(t for t, k in zip(texts, keys) if k not in cache))
+    before = len(cache)
     for i in range(0, len(missing), 16):
         batch = missing[i:i + 16]
         cache.update(zip(map(_key, batch), encoder(batch)))
-    if missing and disk:
-        try:
-            np.savez(cache_path(), keys=np.array(list(cache)), vecs=np.stack(list(cache.values())))
-        except OSError:
-            pass
+    if missing and disk and (len(cache) - before >= _CACHE_SAVE_BATCH or not cache_path().exists()):
+        _save_vectors(cache, cache_path())
     return np.stack([cache[k] for k in keys])

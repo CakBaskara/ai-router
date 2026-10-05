@@ -1,0 +1,189 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1680" viewBox="0 0 1200 1680" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4B5563"/>
+    </marker>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#047857"/>
+    </marker>
+    <style>
+      .edge { fill: none; stroke: #4B5563; stroke-width: 1.6; }
+      .feed { fill: none; stroke: #047857; stroke-width: 1.6; stroke-dasharray: 6 4; }
+      .box { fill: #FFFFFF; stroke: #4B5563; stroke-width: 1.4; }
+      .term { fill: #1F2937; stroke: #1F2937; }
+      .dec { fill: #FEF3C7; stroke: #B45309; stroke-width: 1.4; }
+      .ml { fill: #DBEAFE; stroke: #1D4ED8; stroke-width: 1.4; }
+      .loopbox { fill: #F5F3FF; stroke: #7C3AED; stroke-width: 1.4; stroke-dasharray: 6 4; }
+      .loopnode { fill: #FFFFFF; stroke: #7C3AED; stroke-width: 1.4; }
+      .learnbox { fill: #ECFDF5; stroke: #047857; stroke-width: 1.4; }
+      .learnnode { fill: #FFFFFF; stroke: #047857; stroke-width: 1.4; }
+      .t { font-size: 14px; font-weight: 600; fill: #111827; text-anchor: middle; }
+      .s { font-size: 11.5px; fill: #4B5563; text-anchor: middle; }
+      .tw { font-size: 14px; font-weight: 600; fill: #FFFFFF; text-anchor: middle; }
+      .sw { font-size: 11.5px; fill: #E5E7EB; text-anchor: middle; }
+      .lbl { font-size: 11px; fill: #374151; text-anchor: middle; paint-order: stroke; stroke: #FFFFFF; stroke-width: 4px; }
+      .mono { font-family: Consolas, Menlo, monospace; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="1680" fill="#FFFFFF"/>
+  <text x="40" y="36" font-size="22" font-weight="700" fill="#111827">ai-router · alur kerja</text>
+  <text x="40" y="58" font-size="12.5" fill="#4B5563">Dari prompt masuk sampai jawaban akhir, plus cara router terus belajar</text>
+
+  <!-- Prompt masuk -->
+  <rect class="term" x="290" y="70" width="280" height="60" rx="30"/>
+  <text class="tw" x="430" y="96">Prompt masuk</text>
+  <text class="sw mono" x="430" y="116">ai (chat) · ai "…" (sekali jalan)</text>
+  <path class="edge" d="M430,130 V153" marker-end="url(#a)"/>
+
+  <!-- Tier dikunci? -->
+  <polygon class="dec" points="430,155 550,200 430,245 310,200"/>
+  <text class="t" x="430" y="197">Tier dikunci?</text>
+  <text class="s mono" x="430" y="214">-t heavy · /model heavy</text>
+  <path class="edge" d="M550,200 H618" marker-end="url(#a)"/>
+  <text class="lbl" x="584" y="192">ya</text>
+  <rect class="box" x="620" y="178" width="200" height="44" rx="8"/>
+  <text class="t" x="720" y="197">Pakai tier itu</text>
+  <text class="s" x="720" y="213">lewati klasifikasi</text>
+  <path class="edge" d="M780,222 V950 H652" marker-end="url(#a)"/>
+  <path class="edge" d="M430,245 V288" marker-end="url(#a)"/>
+  <text class="lbl" x="452" y="270">tidak</text>
+
+  <!-- Aturan keyword -->
+  <rect class="box" x="250" y="290" width="360" height="60" rx="8"/>
+  <text class="t" x="430" y="314">Aturan keyword</text>
+  <text class="s" x="430" y="334">refactor → heavy · fix → medium · apa itu → light</text>
+  <path class="edge" d="M430,350 V373" marker-end="url(#a)"/>
+
+  <!-- Ada keyword? -->
+  <polygon class="dec" points="430,375 550,420 430,465 310,420"/>
+  <text class="t" x="430" y="425">Ada keyword?</text>
+  <path class="edge" d="M550,420 H700 V840 H632" marker-end="url(#a)"/>
+  <text class="lbl" x="590" y="412">ya</text>
+  <path class="edge" d="M430,465 V498" marker-end="url(#a)"/>
+  <text class="lbl" x="452" y="486">tidak</text>
+
+  <!-- ML lokal -->
+  <rect class="ml" x="250" y="500" width="360" height="60" rx="8"/>
+  <text class="t" x="430" y="524">ML lokal (Granite Embedding + logreg)</text>
+  <text class="s" x="430" y="544">p = peluang prompt butuh tier berbayar</text>
+  <path class="edge" d="M430,560 V588" marker-end="url(#a)"/>
+
+  <!-- Gate dua sisi -->
+  <polygon class="dec" points="430,590 560,635 430,680 300,635"/>
+  <text class="t" x="430" y="632">Gate dua sisi</text>
+  <text class="s" x="430" y="649">batas low / high</text>
+  <path class="edge" d="M560,635 H700"/>
+  <text class="lbl" x="630" y="627">p ≥ high → heavy</text>
+  <path class="edge" d="M300,635 H140 V840 H228" marker-end="url(#a)"/>
+  <text class="lbl" x="220" y="627">p ≤ low → light/medium</text>
+  <path class="edge" d="M430,680 V713" marker-end="url(#a)"/>
+  <text class="lbl" x="462" y="700">di antara</text>
+
+  <!-- Tanya Haiku -->
+  <rect class="box" x="280" y="715" width="300" height="50" rx="8"/>
+  <text class="t" x="430" y="736">Tanya Haiku</text>
+  <text class="s" x="430" y="754">jawabannya jadi label baru</text>
+  <path class="edge" d="M430,765 V808" marker-end="url(#a)"/>
+
+  <!-- Sesuaikan tier -->
+  <rect class="box" x="230" y="810" width="400" height="60" rx="8"/>
+  <text class="t" x="430" y="834">Sesuaikan tier (chat)</text>
+  <text class="s" x="430" y="854">minimal min_tier · tidak turun dalam satu percakapan</text>
+  <path class="edge" d="M430,870 V908" marker-end="url(#a)"/>
+
+  <!-- Pilih provider -->
+  <rect class="box" x="210" y="910" width="440" height="80" rx="8"/>
+  <text class="t" x="430" y="936">Pilih provider</text>
+  <text class="s" x="430" y="957">light / medium → Gemini, Copilot dulu (gratis)</text>
+  <text class="s" x="430" y="975">heavy → Claude / Codex, yang paling jarang dipakai hari ini</text>
+  <path class="edge" d="M430,990 V1028" marker-end="url(#a)"/>
+
+  <!-- Jalankan -->
+  <rect class="box" x="250" y="1030" width="360" height="56" rx="8"/>
+  <text class="t" x="430" y="1053">Jalankan</text>
+  <text class="s" x="430" y="1072">gagal → provider berikutnya di urutan</text>
+  <path class="edge" d="M430,1086 V1103" marker-end="url(#a)"/>
+
+  <!-- Heavy di chat? -->
+  <polygon class="dec" points="430,1105 560,1150 430,1195 300,1150"/>
+  <text class="t" x="430" y="1155">Heavy di chat?</text>
+  <path class="edge" d="M560,1150 H780 V1552 H652" marker-end="url(#a)"/>
+  <text class="lbl" x="605" y="1142">tidak</text>
+  <path class="edge" d="M430,1195 V1238" marker-end="url(#a)"/>
+  <text class="lbl" x="446" y="1205">ya</text>
+
+  <!-- Loop review -->
+  <rect class="loopbox" x="170" y="1214" width="520" height="268" rx="14"/>
+  <text x="186" y="1236" font-size="13" font-weight="700" fill="#6D28D9">Loop review</text>
+  <polygon class="dec" points="430,1240 545,1275 430,1310 315,1275"/>
+  <text class="t" x="430" y="1280">Kuota 5 jam ≥ 20%?</text>
+  <path class="edge" d="M545,1275 H780"/>
+  <text class="lbl" x="610" y="1267">tidak</text>
+  <path class="edge" d="M430,1310 V1333" marker-end="url(#a)"/>
+  <text class="lbl" x="444" y="1325">ya</text>
+  <rect class="loopnode" x="270" y="1335" width="320" height="50" rx="8"/>
+  <text class="t" x="430" y="1356">Review oleh provider lawan</text>
+  <text class="s" x="430" y="1374">read-only: baca file, git diff</text>
+  <path class="edge" d="M430,1385 V1398" marker-end="url(#a)"/>
+  <polygon class="dec" points="430,1400 500,1432 430,1464 360,1432"/>
+  <text class="t" x="430" y="1437">LOLOS?</text>
+  <path class="edge" d="M500,1432 H780"/>
+  <text class="lbl" x="530" y="1424">ya</text>
+  <path class="edge" d="M360,1432 H312" marker-end="url(#a)"/>
+  <text class="lbl" x="337" y="1424">tidak</text>
+  <rect class="loopnode" x="186" y="1412" width="124" height="42" rx="8"/>
+  <text class="t" x="248" y="1430">Revisi</text>
+  <text class="s" x="248" y="1446">oleh penjawab</text>
+  <path class="edge" d="M248,1412 V1275 H313" marker-end="url(#a)"/>
+
+  <!-- Jawaban akhir -->
+  <rect class="term" x="210" y="1520" width="440" height="64" rx="12"/>
+  <text class="tw" x="430" y="1547">Jawaban akhir</text>
+  <text class="sw" x="430" y="1569">dicatat di routes.jsonl · kuota → status bar &amp; ai --quota</text>
+
+  <!-- Belajar terus -->
+  <rect class="learnbox" x="850" y="280" width="330" height="520" rx="14"/>
+  <text x="1015" y="306" font-size="14" font-weight="700" fill="#065F46" text-anchor="middle">Belajar terus (latar belakang)</text>
+  <text x="870" y="332" font-size="11.5" font-weight="600" fill="#065F46">Sumber label</text>
+  <rect class="learnnode" x="870" y="342" width="290" height="50" rx="8"/>
+  <text class="t" x="1015" y="363">Haiku saat ML ragu</text>
+  <text class="s" x="1015" y="381">label llm</text>
+  <rect class="learnnode" x="870" y="400" width="290" height="50" rx="8"/>
+  <text class="t" x="1015" y="421">Audit acak 10%</text>
+  <text class="s" x="1015" y="439">Haiku cek ulang keputusan ML → label audit</text>
+  <rect class="learnnode" x="870" y="458" width="290" height="50" rx="8"/>
+  <text class="t" x="1015" y="479">Koreksi dari kamu</text>
+  <text class="s" x="1015" y="497">ganti model setelah jawaban → label user</text>
+  <rect class="learnnode" x="870" y="516" width="290" height="50" rx="8"/>
+  <text class="t" x="1015" y="537">Guru Sonnet</text>
+  <text class="s" x="1015" y="555">tiap 25 prompt belum berlabel → label teacher</text>
+  <path class="edge" d="M1015,566 V604" marker-end="url(#a)"/>
+  <text x="1024" y="589" font-size="11" fill="#065F46">keempat sumber</text>
+  <rect class="learnnode" x="905" y="606" width="220" height="44" rx="8"/>
+  <text class="t mono" x="1015" y="633">labels.jsonl</text>
+  <path class="edge" d="M1015,650 V688" marker-end="url(#a)"/>
+  <rect class="learnnode" x="870" y="690" width="290" height="84" rx="8"/>
+  <text class="t" x="1015" y="714">Latih ulang + hitung gate</text>
+  <text class="s" x="1015" y="733">coba 6 setelan, dipakai hanya kalau lebih baik</text>
+  <text class="s" x="1015" y="748">uji silang 5 fold → batas low / high</text>
+  <text class="s" x="1015" y="763">hasilnya dicatat di ml_history.jsonl</text>
+  <path class="feed" d="M870,722 H830 V530 H612" marker-end="url(#ag)"/>
+  <text class="lbl" x="740" y="522" fill="#047857">model baru</text>
+
+  <!-- Legenda -->
+  <g font-size="12" fill="#374151">
+    <rect class="term" x="40" y="1622" width="18" height="14" rx="4"/>
+    <text x="66" y="1634">mulai / selesai</text>
+    <rect class="dec" x="190" y="1622" width="18" height="14"/>
+    <text x="216" y="1634">keputusan</text>
+    <rect class="ml" x="310" y="1622" width="18" height="14"/>
+    <text x="336" y="1634">ML lokal</text>
+    <rect class="loopbox" x="420" y="1622" width="18" height="14"/>
+    <text x="446" y="1634">loop review (khusus heavy di chat)</text>
+    <rect class="learnbox" x="670" y="1622" width="18" height="14"/>
+    <text x="696" y="1634">belajar di latar belakang</text>
+    <path class="feed" d="M870,1629 H900" marker-end="url(#ag)"/>
+    <text x="908" y="1634">model hasil latihan dipakai lagi</text>
+  </g>
+</svg>

@@ -437,3 +437,50 @@ def test_changed_code_reloads_between_back_to_back_prompts_and_keeps_the_next_on
             assert again.chat.transcript[-2] == ("User", "prompt berikutnya")
             assert not again.queue
     asyncio.run(go())
+
+
+def test_stop_button_shows_while_busy_and_cancels():
+    async def go():
+        app = make_app()
+        cancelled = []
+        app.chat.cancel = lambda: cancelled.append(True)
+        async with app.run_test(size=(100, 20)) as pilot:
+            await pilot.pause()
+            stop = app.query_one("#stop")
+            assert stop.display and not stop.has_class("busy")
+            app.busy = True
+            await pilot.pause()
+            assert stop.has_class("busy")
+            await pilot.click("#stop")
+            assert cancelled == [True]
+            app.busy = False
+            await pilot.pause()
+            assert not stop.has_class("busy")
+    asyncio.run(go())
+
+
+def test_streaming_reply_follows_until_user_scrolls_up():
+    async def go():
+        app = make_app()
+        async with app.run_test(size=(80, 20)) as pilot:
+            app.start_reply("sonnet", "claude · medium")
+            await pilot.pause()
+            log = app.query_one("#log", VerticalScroll)
+            for i in range(40):
+                await app.reply_show("text", f"baris {i}\n\n")
+                await pilot.pause(0.02)
+            await pilot.pause(0.2)
+            assert log.max_scroll_y > 0 and log.scroll_y == log.max_scroll_y
+            await pilot.click("#up")
+            await pilot.pause(0.1)
+            held = log.scroll_y
+            await app.reply_show("text", "baris baru\n\n")
+            await pilot.pause(0.2)
+            assert log.scroll_y == held < log.max_scroll_y
+            log.scroll_end(animate=False)
+            await pilot.pause(0.1)
+            for i in range(5):
+                await app.reply_show("text", f"lagi {i}\n\n")
+            await pilot.pause(0.2)
+            assert log.scroll_y == log.max_scroll_y
+    asyncio.run(go())

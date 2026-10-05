@@ -2,3 +2,5 @@ logs/
 __pycache__/
 *.egg-info/
 .pytest_cache/
+_pytest_safe_run*/
+test-tmp/

@@ -76,9 +76,21 @@ def test_cmd_flags_per_provider(tmp_path):
     copilot = dispatch.chat_cmd("copilot", "auto", "low", None, [img, txt], "D:/att")
     assert copilot.count("--attachment") == 1 and "--add-dir" in copilot
     gemini = dispatch.chat_cmd("gemini", "g", "low", None, [img], "D:/att")
-    assert gemini[gemini.index("--include-directories") + 1] == "D:/att"
+    assert str(Path("D:/att").resolve()) in gemini
     claude = dispatch.chat_cmd("claude", "opus", "high", None, attach_dir="D:/att")
     assert str(Path("D:/att").resolve()) in claude
+
+
+def test_every_provider_gets_the_same_roots(monkeypatch):
+    monkeypatch.setattr(dispatch.config, "load", lambda: {"chat": {"dirs": ["D:/extra"]}})
+    flags = {"claude": "--add-dir", "copilot": "--add-dir", "gemini": "--include-directories"}
+    want = dispatch.chat_roots("D:/att")
+    assert str(Path("D:/extra").resolve()) in want
+    for provider, flag in flags.items():
+        cmd = dispatch.chat_cmd(provider, "m", "low", None, attach_dir="D:/att")
+        assert [cmd[i + 1] for i, a in enumerate(cmd) if a == flag] == want
+    codex = dispatch.chat_cmd("codex", "m", "low", None, attach_dir="D:/att")
+    assert json.dumps(want) in " ".join(codex)
 
 
 def test_send_passes_attachments_and_notes_them_in_recap(tmp_path):

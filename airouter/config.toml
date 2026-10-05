@@ -20,6 +20,8 @@ teacher = "sonnet"
 
 [chat]
 min_tier = "light"
+# Extra folders every provider may read and write in chat, on top of the current one.
+dirs = ["D:/DOCUMENT/02_Main"]
 
 # Shown by /models and Ctrl+O, listed first. Codex adds `codex debug models` and Gemini adds the models
 # its API key can call. Copilot and Claude Code have no way to list models, so their lists are kept here.

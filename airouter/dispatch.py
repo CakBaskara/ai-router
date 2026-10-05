@@ -113,6 +113,7 @@ def build(provider: str, model: str, effort: str, prompt: str, interactive: bool
 
 def chat_roots(attach_dir=None):
     roots = [str(config.REPO_ROOT.resolve())]
+    roots += [str(Path(d).expanduser().resolve()) for d in config.load().get("chat", {}).get("dirs", [])]
     if attach_dir:
         roots.append(str(Path(attach_dir).resolve()))
     return list(dict.fromkeys(roots))
@@ -145,14 +146,14 @@ def chat_cmd(provider: str, model: str, effort: str, session: str | None, files=
     if provider == "gemini":
         cmd = gemini_cmd() + ["-p", " ", "-m", model, "-o", "stream-json", "--approval-mode", "auto_edit",
                               "--skip-trust"]
-        cmd += ["--include-directories", attach_dir] if files and attach_dir else []
+        cmd += [arg for root in chat_roots(attach_dir) for arg in ("--include-directories", root)]
         return cmd + (["--resume", session] if session else [])
     if provider == "copilot":
         cmd = copilot_cmd() + _copilot_model(model, effort) + [
             "--output-format", "json", "--allow-all-tools", "--no-ask-user"] + _deny(COPILOT_DENY)
         cmd += [arg for f in files for arg in ("--attachment", str(f))
                 if attach.is_image(Path(f)) or Path(f).suffix.lower() == ".pdf"]
-        cmd += ["--add-dir", attach_dir] if files and attach_dir else []
+        cmd += [arg for root in chat_roots(attach_dir) for arg in ("--add-dir", root)]
         return cmd + (["--session-id", session] if session else [])
     raise ValueError(f"unknown provider: {provider}")
 

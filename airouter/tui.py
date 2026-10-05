@@ -102,6 +102,9 @@ Info { color: #6E7681; text-style: italic; margin: 1 0 0 0; }
 #inputrow { height: auto; background: ansi_default; }
 #clip { width: 4; padding: 0 1; color: #9D9D9D; background: ansi_default; }
 #clip:hover { background: #2B2B2B; }
+#stop { width: 4; padding: 0 1; color: #3C3C3C; background: ansi_default; }
+#stop.busy { color: #F85149; }
+#stop:hover { background: #2B2B2B; }
 #files { height: auto; color: #9D9D9D; background: ansi_default; display: none; }
 #files.has { display: block; }
 Composer { width: 1fr; height: auto; min-height: 1; max-height: 10; background: ansi_default; color: #CCCCCC; border: none; padding: 0; }
@@ -265,6 +268,11 @@ class AttachButton(Static):
         self.app.pick_files()
 
 
+class StopButton(Static):
+    def on_click(self):
+        self.app.action_cancel()
+
+
 class ScrollButton(Static):
     STEP = 3
 
@@ -403,7 +411,7 @@ class ChatApp(App):
         self.draft = carry.get("draft", "")
         self.pending = list(carry.get("queue", []))
         self.reply = None
-        self.busy = False
+        self._busy = False
         self.queue = []
         self.attachments = list(carry.get("attachments", []))
         self.picking = False
@@ -428,6 +436,7 @@ class ChatApp(App):
             with Horizontal(id="inputrow"):
                 yield Static("›", id="prompt")
                 yield Composer(id="input", placeholder="Tanya apa saja…", highlight_cursor_line=False)
+                yield StopButton("■", id="stop")
                 yield AttachButton("📎", id="clip")
 
     def on_mount(self):
@@ -443,6 +452,7 @@ class ChatApp(App):
         else:
             self.add_info("Edit dan perintah dijalankan otomatis (mode auto). "
                           "Ctrl+O ganti model · Esc hentikan jawaban · /help perintah")
+        self.query_one("#log", VerticalScroll).anchor()
         self.refresh_status()
         composer = self.query_one(Composer)
         if self.draft:
@@ -463,6 +473,16 @@ class ChatApp(App):
 
     def on_unmount(self):
         self.chat.close()
+
+    @property
+    def busy(self) -> bool:
+        return self._busy
+
+    @busy.setter
+    def busy(self, value: bool):
+        self._busy = value
+        for stop in self.query("#stop"):
+            stop.set_class(value, "busy")
 
     def code_changed(self) -> bool:
         if isinstance(self.screen, ModalScreen):
@@ -521,16 +541,7 @@ class ChatApp(App):
             self.query_one("#sticky-why", Static).update(visible.query_one(".why", Static).render())
 
     def _mount(self, widget):
-        log = self.query_one("#log", VerticalScroll)
-        follow = log.max_scroll_y - log.scroll_y <= 3
-        log.mount(widget)
-        if follow:
-            self.call_after_refresh(log.scroll_end, animate=False)
-
-    def _follow(self):
-        log = self.query_one("#log", VerticalScroll)
-        if log.max_scroll_y - log.scroll_y <= 3:
-            self.call_after_refresh(log.scroll_end, animate=False)
+        self.query_one("#log", VerticalScroll).mount(widget)
 
     def add_info(self, text: str):
         self._mount(Info(text, markup=False))
@@ -543,7 +554,6 @@ class ChatApp(App):
     def reply_show(self, kind: str, text: str):
         if not self.reply:
             return None
-        self._follow()
         if kind == "note":
             self.reply.add_tool(text)
             return None
@@ -555,7 +565,6 @@ class ChatApp(App):
         if self.reply:
             self.reply.finish(mark, stats)
             self.reply.set_class(failed, "failed")
-        self._follow()
 
     @on(Composer.Submitted)
     def submitted(self, event: Composer.Submitted):

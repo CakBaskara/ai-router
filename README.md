@@ -40,7 +40,7 @@ py -m pip install -e .
 | `ai -n "..."` | Show the route only, don't run it |
 | `ai --ml` | See how the router's model is doing |
 
-In the chat, Enter sends, Shift+Enter adds a line, Esc stops an answer, and Ctrl+O picks a
+In the chat, Enter sends, Shift+Enter adds a line, Esc or ■ stops an answer, and Ctrl+O picks a
 model. Alt+V pastes a screenshot. You can also click 📎 or drag a file in. Type `/help` for
 the rest.
 

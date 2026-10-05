@@ -8,7 +8,7 @@ from airouter import attach, config, dispatch
 from airouter.chat import Chat, image_blocks, with_files
 from airouter.tui import ChatApp, Composer, UserBubble
 
-CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing")}, "providers": ["claude", "codex"]}
+CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing", "loop")}, "providers": ["claude", "codex"]}
 
 
 def png(path, size=(4, 4)):

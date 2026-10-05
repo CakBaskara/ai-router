@@ -3,7 +3,7 @@ from datetime import datetime
 from airouter import config, dispatch
 from airouter.chat import Chat, CopilotTurn, GeminiTurn, lineup
 
-CFG = {k: v for k, v in config.load().items() if k != "chat"}
+CFG = {k: v for k, v in config.load().items() if k not in ("chat", "loop")}
 
 
 def test_gemini_turn_parses_stream():

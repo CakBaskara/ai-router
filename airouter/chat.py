@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import attach, config, dispatch, learn
+from . import attach, codex, config, dispatch, learn
 from .codex import CodexProc
 from .config import log, say, usage_today
 from .learn import TIERS, classify
@@ -37,6 +37,20 @@ CHAT_NOTE = (
     "\"ganti ke codex\" does the same. /new starts a new conversation. "
     "Answer naturally, like a helpful colleague, not curtly.\n\n"
 )
+REVIEW_PROMPT = (
+    "You are an independent reviewer of another AI assistant's answer, given below with the request it answers. "
+    "Verify instead of guessing: read files and run read-only commands such as git diff where that settles a claim. "
+    "Do not change any file. Judge correctness, completeness against the request, bugs, risks and claims without "
+    "evidence; ignore style and minor preferences. End with a line holding only LOLOS or REVISI. After REVISI, list "
+    "the concrete problems that must be fixed, most important first, in the language of the request.\n\n"
+)
+REVISE_PROMPT = (
+    "An independent reviewer ({reviewer}) asked for a revision of your last answer:\n\n{critique}\n\n"
+    "Check each point, and look at code or files only when the point is about them. Fix what is right, files "
+    "included; reject what is wrong with a short reason. Then write your full final answer again without talking "
+    "about the review, because the user reads only this one."
+)
+VERDICT = re.compile(r"^\W*(LOLOS|REVISI)\b\W*$", re.M | re.I)
 STATE = ("tier", "provider", "model", "sessions", "synced", "transcript",
          "pinned_provider", "pinned_tier", "pinned_model")
 RECAP_ENTRIES = 12
@@ -54,6 +68,15 @@ STRONGER = ("kuat", "pintar", "berat", "naik", "stronger", "smarter", "bigger")
 BARE_STEP = re.compile(r"(?:(?:oke|ok|coba|tolong|please) )*(?:turun(?:kan|in)?|naik(?:kan|in)?)"
                        r"(?: (?:aja|saja|dong|ya|deh))?[.!]?")
 TOOL_KEYS = ("file_path", "command", "pattern", "path", "url", "query", "description")
+
+
+def parse_review(text: str) -> tuple[str | None, str]:
+    found = list(VERDICT.finditer(text))
+    if not found:
+        return None, "jawaban reviewer tidak berakhir dengan LOLOS atau REVISI"
+    verdict = found[-1].group(1).upper()
+    critique = text[found[-1].end():].strip() or text[:found[-1].start()].strip()
+    return verdict, critique if verdict == "REVISI" else ""
 
 
 def higher(a: str, b: str) -> str:
@@ -618,6 +641,10 @@ class Chat:
             if ok or code == 130:
                 if turn.session:
                     self.sessions[provider] = turn.session
+                if ok:
+                    self.ui.done(seconds, turn.usage)
+                    if tier in self.cfg.get("loop", {}).get("tiers", []):
+                        turn = self.refine(msg, tier, provider, route, turn, runner)
                 reply = turn.text() + (" [dibatalkan]" if code == 130 else "")
                 with self._input_lock:
                     said = "\n\n".join([msg] + self.injected)
@@ -626,10 +653,9 @@ class Chat:
                 self.transcript += [("User", said), ("Assistant", reply)]
                 self.synced[provider] = len(self.transcript)
                 self.provider, self.tier, self.model = provider, tier, route["model"]
-                if ok:
-                    self.ui.done(seconds, turn.usage)
-                else:
+                if not ok:
                     self.ui.failed(provider, code, "", None)
+                self.learn_later()
                 return code
             fallback = providers[i + 1] if i < len(providers) - 1 else None
             self.ui.failed(provider, code, turn.error, fallback)
@@ -638,7 +664,99 @@ class Chat:
             self.injected = []
         said += f"\n[lampiran: {', '.join(f.name for f in attachments)}]" if attachments else ""
         self.transcript += [("User", said), ("Assistant", f"[gagal: {turn.error or code}]")]
+        self.learn_later()
         return code
+
+    def learn_later(self):
+        threading.Thread(target=learn.teach_if_due, args=(self.cfg,), daemon=True).start()
+
+    def reviewer(self, provider: str) -> str:
+        other = "codex" if provider == "claude" else "claude"
+        return other if other in self.cfg["providers"] else provider
+
+    def quota_low(self, providers) -> str | None:
+        floor = self.cfg.get("loop", {}).get("min_quota", 20)
+        if "codex" in providers:
+            config.save_quota("codex", config.codex_windows(codex.read_limits()))
+        data = config.load_quota()
+        for provider in dict.fromkeys(providers):
+            window = (data.get(provider) or {}).get("5h")
+            if window and config.quota_left(window) < floor:
+                return f"kuota 5 jam {provider} tinggal {config.quota_left(window)}% (batas {floor}%)"
+        return None
+
+    def refine(self, msg: str, tier: str, provider: str, route: dict, turn, runner):
+        reviewer = self.reviewer(provider)
+        review_route = dict(self.cfg["tiers"][tier][reviewer])
+        rounds = 0
+        while not self._cancelled:
+            low = self.quota_low((provider, reviewer))
+            if low:
+                self.ui.info(f"loop berhenti: {low}")
+                break
+            rounds += 1
+            self.ui.info(f"review {rounds} oleh {reviewer} {review_route['model']}...")
+            verdict, critique = self.review(msg, turn.text(), reviewer, review_route, tier, runner)
+            if verdict == "LOLOS":
+                self.ui.info(f"✓ lolos review {rounds}")
+                break
+            if verdict != "REVISI":
+                self.ui.info(f"loop berhenti: {critique}")
+                break
+            self.ui.info(f"↻ revisi {rounds} dari {reviewer}:\n{critique}")
+            self.ui.start(tier, provider, route, [f"revisi {rounds}"])
+            revised = TURNS[provider]()
+            started = time.time()
+            try:
+                code = self._run(provider, route, REVISE_PROMPT.format(reviewer=reviewer, critique=critique),
+                                 revised, runner)
+            except OSError as exc:
+                revised.error, code = _short(str(exc), 300), 1
+            self._proc = None
+            if self._cancelled:
+                code = 130
+            seconds = round(time.time() - started, 1)
+            self._log_loop("revise", tier, provider, route, code, seconds, revised.session)
+            if code != 0 or revised.error or not revised.text():
+                self.ui.failed(provider, code, revised.error or "tidak ada jawaban", None)
+                break
+            if revised.session:
+                self.sessions[provider] = revised.session
+            self.ui.done(seconds, revised.usage)
+            turn = revised
+        return turn
+
+    def review(self, msg: str, answer: str, reviewer: str, route: dict, tier: str, runner) -> tuple[str | None, str]:
+        context = recap(self.transcript) if self.transcript else ""
+        prompt = f"{REVIEW_PROMPT}{context}Request:\n{msg}\n\n---\nAnswer to review:\n{answer}"
+        turn = TURNS[reviewer]()
+        started = time.time()
+        try:
+            code = (runner or stream)(dispatch.review_cmd(reviewer, route["model"], route["effort"]), prompt, turn,
+                                      lambda kind, text: None, self._started)
+        except OSError as exc:
+            turn.error, code = _short(str(exc), 300), 1
+        self._proc = None
+        self._log_loop("review", tier, reviewer, route, code, round(time.time() - started, 1), None)
+        if self._cancelled:
+            return None, "dibatalkan"
+        if code != 0 or turn.error:
+            return None, f"review gagal: {turn.error or f'exit {code}'}"
+        return parse_review(turn.text())
+
+    def _log_loop(self, mode, tier, provider, route, code, seconds, session):
+        log({
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "cwd": os.getcwd(),
+            "mode": mode,
+            "session": session,
+            "tier": tier,
+            "provider": provider,
+            "model": route["model"],
+            "effort": route["effort"],
+            "exit": code,
+            "seconds": seconds,
+        })
 
     def inject(self, msg: str, files=()) -> bool:
         with self._input_lock:

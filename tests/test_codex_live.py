@@ -200,7 +200,7 @@ def test_live_codex_resumes_saved_thread(server):
 
 
 def test_chat_records_injected_text_and_reuses_live_codex(server):
-    chat = Chat(config.load(), provider="codex", tier="heavy", use_llm=False)
+    chat = Chat({**config.load(), "loop": {}}, provider="codex", tier="heavy", use_llm=False)
     worker = threading.Thread(target=lambda: chat.send("first"))
     worker.start()
     wait_until(lambda: chat._codex and chat._codex.turn_id == "turn-1")
@@ -224,7 +224,7 @@ def test_chat_records_injected_text_and_reuses_live_codex(server):
 
 def test_codex_ui_injects_without_queue_and_updates_model_label(server):
     async def go():
-        app = ChatApp(config.load(), "codex", "heavy", False)
+        app = ChatApp({**config.load(), "loop": {}}, "codex", "heavy", False)
         app.chat.prewarm = lambda: None
         app.chat._catalog = [("codex", "gpt-6.1-sol")]
         app.chat.model = "opus"
@@ -270,7 +270,7 @@ def test_codex_and_claude_receive_router_root(monkeypatch):
 
 
 def test_short_tier_adjustment_uses_current_provider_only():
-    chat = Chat(config.load(), use_llm=False)
+    chat = Chat({**config.load(), "loop": {}}, use_llm=False)
     assert chat.switch_command("oke coba turunkan.") is None
     chat.tier, chat.provider = "heavy", "codex"
     medium = chat.cfg["tiers"]["medium"]["codex"]["model"]
@@ -280,7 +280,7 @@ def test_short_tier_adjustment_uses_current_provider_only():
 
 
 def test_failed_codex_preserves_injected_prompt_and_attachment(server, tmp_path):
-    chat = Chat(config.load(), provider="codex", tier="heavy", use_llm=False)
+    chat = Chat({**config.load(), "loop": {}}, provider="codex", tier="heavy", use_llm=False)
     worker = threading.Thread(target=lambda: chat.send("first"))
     worker.start()
     wait_until(lambda: chat._codex and chat._codex.turn_id == "turn-1")

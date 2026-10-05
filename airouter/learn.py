@@ -478,8 +478,7 @@ def audit_summary(last: int = 100) -> dict | None:
     return {"checked": len(rows), "agree": round(sum(r["agree"] for r in rows) / len(rows), 3)}
 
 
-def teach(cfg: dict, info, batch: int = 25) -> int:
-    model = Learner.load()
+def untaught(model: "Learner") -> list[str]:
     known = {_norm(r["text"]) for r in model.rows}
     prompts = []
     for row in _jsonl(config.log_path()):
@@ -487,16 +486,79 @@ def teach(cfg: dict, info, batch: int = 25) -> int:
         if text and not text.startswith("/") and _norm(text) not in known:
             known.add(_norm(text))
             prompts.append(text)
+    return prompts
+
+
+def _labels(prompts: list[str], teacher: str) -> list[str | None]:
+    tiers = dispatch.llm_classify_batch(prompts, teacher)
+    if len(prompts) > 1 and not any(t in TIERS for t in tiers):
+        half = len(prompts) // 2
+        return _labels(prompts[:half], teacher) + _labels(prompts[half:], teacher)
+    return tiers
+
+
+def teach(cfg: dict, info, batch: int = 25) -> int:
+    model = Learner.load()
+    prompts = untaught(model)
     teacher = cfg["classifier"].get("teacher", "sonnet")
     added = 0
     for i in range(0, len(prompts), batch):
         chunk = prompts[i:i + batch]
         info(f"guru {teacher} melabeli {i + len(chunk)}/{len(prompts)} prompt...")
-        for text, tier in zip(chunk, dispatch.llm_classify_batch(chunk, teacher)):
+        for text, tier in zip(chunk, _labels(chunk, teacher)):
             if tier in TIERS:
                 model.add(text, tier, "teacher")
                 added += 1
     return added
+
+
+TEACH_RETRY = 600
+TEACH_STALE = 1800
+
+
+def teach_lock() -> Path:
+    return labels_path().with_name("ml_teach.lock")
+
+
+def _claim(lock: Path) -> bool:
+    try:
+        if lock.exists():
+            age = time.time() - lock.stat().st_mtime
+            busy = lock.read_text(encoding="utf-8").strip() == "running"
+            if age < (TEACH_STALE if busy else TEACH_RETRY):
+                return False
+            lock.unlink()
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except OSError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("running")
+    return True
+
+
+def teach_due(cfg: dict) -> bool:
+    every = cfg["classifier"].get("teach_every", 0)
+    return every > 0 and len(untaught(Learner.load())) >= every
+
+
+def teach_if_due(cfg: dict, info=lambda text: None) -> int | None:
+    c = cfg["classifier"]
+    if not teach_due(cfg):
+        return None
+    lock = teach_lock()
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    if not _claim(lock):
+        return None
+    try:
+        added = teach(cfg, info)
+        if added:
+            Learner.load(get_encoder() if c.get("embed", True) else None).report(c.get("ml_target_accuracy", 0.9))
+        return added
+    finally:
+        try:
+            lock.write_text("done", encoding="utf-8")
+        except OSError:
+            pass
 
 
 def judge(prompt: str, cfg: dict, info, use_llm: bool = True, wait: bool = True) -> tuple[str | None, str | None, bool]:

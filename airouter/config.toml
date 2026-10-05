@@ -17,6 +17,14 @@ embed = true
 audit_rate = 0.1
 # Stronger model that labels past prompts from routes.jsonl when `ai --ml-train` runs.
 teacher = "sonnet"
+# The teacher also runs on its own in the background once this many logged prompts have no label; 0 turns it off.
+teach_every = 25
+
+[loop]
+# Answers in these tiers go to a reviewer on the other paid provider and are revised until the reviewer passes them.
+tiers = ["heavy"]
+# The loop stops early when the 5-hour quota left for the answerer or the reviewer falls below this percent.
+min_quota = 20
 
 [chat]
 min_tier = "light"

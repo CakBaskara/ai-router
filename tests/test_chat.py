@@ -3,9 +3,9 @@ import threading
 import time
 
 from airouter import config, dispatch
-from airouter.chat import CHAT_NOTE, Chat, ClaudeTurn, CodexTurn, recap
+from airouter.chat import CHAT_NOTE, Chat, ClaudeTurn, CodexTurn, parse_review, recap
 
-CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing")}, "providers": ["claude", "codex"]}
+CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing", "loop")}, "providers": ["claude", "codex"]}
 
 
 def fake_runner(replies):
@@ -403,3 +403,49 @@ def test_quota_report_lists_both_providers():
     from airouter.cli import quota_report
     text = quota_report({"codex": {"at": 0, "5h": {"used": 25, "resets": 4102444800}}})
     assert "codex   5 jam   sisa  75%" in text and "claude  belum ada data" in text
+
+
+LOOP_CFG = {**CFG, "loop": {"tiers": ["heavy"], "min_quota": 20}}
+
+
+def test_heavy_answer_is_revised_until_reviewer_passes():
+    run, calls = fake_runner([(0, claude_reply("versi 1")), (0, codex_reply("Cek angka.\nREVISI\n- angka salah")),
+                              (0, claude_reply("versi 2")), (0, codex_reply("Sudah benar.\n**LOLOS**"))])
+    c = Chat(LOOP_CFG, provider="claude", tier="heavy", use_llm=False)
+    assert c.send("hitung ulang anggaran", runner=run) == 0
+    assert c.transcript[-1] == ("Assistant", "versi 2")
+    assert [cmd[cmd.index("exec") + 1] if "exec" in cmd else "claude" for cmd, _ in calls] == \
+        ["claude", "-m", "claude", "-m"]
+    assert "read-only" in calls[1][0] and "versi 1" in calls[1][1] and "hitung ulang anggaran" in calls[1][1]
+    assert "- angka salah" in calls[2][1]
+    rows = [json.loads(line) for line in config.log_path().read_text(encoding="utf-8").splitlines()]
+    assert [r["mode"] for r in rows] == ["chat", "review", "revise", "review"]
+    assert all("prompt" not in r for r in rows[1:])
+
+
+def test_loop_stops_when_quota_is_low():
+    config.save_quota("claude", {"5h": {"used": 90, "resets": None}})
+    run, calls = fake_runner([(0, claude_reply("jawaban"))])
+    c = Chat(LOOP_CFG, provider="claude", tier="heavy", use_llm=False)
+    assert c.send("rancang arsitektur", runner=run) == 0
+    assert len(calls) == 1 and c.transcript[-1] == ("Assistant", "jawaban")
+
+
+def test_loop_skips_tiers_not_listed():
+    run, calls = fake_runner([(0, claude_reply("ok"))])
+    c = Chat(LOOP_CFG, provider="claude", tier="medium", use_llm=False)
+    assert c.send("fix bug ini", runner=run) == 0 and len(calls) == 1
+
+
+def test_unreadable_review_keeps_first_answer():
+    run, calls = fake_runner([(0, claude_reply("jawaban")), (0, codex_reply("kelihatannya bagus"))])
+    c = Chat(LOOP_CFG, provider="claude", tier="heavy", use_llm=False)
+    assert c.send("rancang arsitektur", runner=run) == 0
+    assert len(calls) == 2 and c.transcript[-1] == ("Assistant", "jawaban")
+
+
+def test_parse_review_takes_last_verdict():
+    assert parse_review("REVISI\n- a") == ("REVISI", "- a")
+    assert parse_review("Awalnya REVISI tapi\nsetelah cek:\nLOLOS") == ("LOLOS", "")
+    assert parse_review("1. tambah test\n\nREVISI") == ("REVISI", "1. tambah test")
+    assert parse_review("tidak ada vonis")[0] is None

@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -22,6 +23,7 @@ def _parse(argv):
     p.add_argument("--ml", action="store_true", help="show what the local prompt classifier has learned")
     p.add_argument("--ml-train", action="store_true",
                    help="download the embedding model, let the teacher model label past prompts, then report")
+    p.add_argument("--ml-auto", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--quota", action="store_true", help="show the Claude and Codex usage left in the 5-hour and weekly windows")
     return p.parse_args(argv)
 
@@ -60,6 +62,10 @@ def main(argv=None) -> int:
     if args.quota:
         config.save_quota("codex", config.codex_windows(codex.read_limits()))
         print(quota_report(config.load_quota()))
+        return 0
+
+    if args.ml_auto:
+        learn.teach_if_due(cfg)
         return 0
 
     if args.ml or args.ml_train:
@@ -129,4 +135,15 @@ def main(argv=None) -> int:
         "seconds": round(time.time() - started, 1),
         "prompt": prompt[:500],
     })
+    if learn.teach_due(cfg):
+        _learn_detached()
     return code
+
+
+def _learn_detached():
+    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        subprocess.Popen([sys.executable, "-m", "airouter", "--ml-auto"], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
+    except OSError:
+        pass

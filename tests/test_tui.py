@@ -8,7 +8,7 @@ from textual.containers import VerticalScroll
 
 from airouter.tui import ChatApp, Composer, ModelPicker, Reply, ScrollButton, UserBubble
 
-CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing")}, "providers": ["claude", "codex"]}
+CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing", "loop")}, "providers": ["claude", "codex"]}
 
 EVENTS = [
     {"type": "system", "subtype": "init", "session_id": "s1"},

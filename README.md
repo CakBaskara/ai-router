@@ -54,10 +54,12 @@ the rest.
 3. Light and medium go to the free providers first. Heavy goes to Claude or Codex,
    whichever I've used less today.
 4. If one fails, the next one takes over.
+5. In the chat, a heavy answer goes to the other paid model for review. It gets revised until
+   the reviewer passes it, or until either model has less than 20% of its 5-hour quota left.
 
 The local model learns as you go. It learns from Haiku's answers, from random spot checks,
 and from you: switching the model after an answer counts as a correction.
-`ai --ml-train` lets Sonnet label your old prompts. I run it every evening.
+Every 25 new prompts, Sonnet labels them in the background. `ai --ml-train` does it right away.
 
 ## Good to know
 

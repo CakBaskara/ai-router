@@ -12,7 +12,8 @@ from airouter import config, dispatch, learn
 from airouter.chat import Chat
 from airouter.learn import Learner, classify
 
-CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing")}, "providers": ["claude", "codex"]}
+REAL_TEACH_DUE = learn.teach_due
+CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing", "loop")}, "providers": ["claude", "codex"]}
 
 RULES = config.load()["rules"]
 
@@ -240,3 +241,41 @@ def test_vector_cache_survives_restart():
     learn.vectors(["halo apa kabar"], first)
     learn.vectors(["halo apa kabar"], second)
     assert (first.encoded, second.encoded) == (1, 0)
+
+
+def test_teacher_runs_on_its_own_once_enough_prompts_wait(monkeypatch):
+    monkeypatch.setattr(learn, "teach_due", REAL_TEACH_DUE)
+    monkeypatch.setattr(dispatch, "llm_classify_batch", lambda prompts, model: ["heavy"] * len(prompts))
+    cfg = {**CFG, "classifier": {**CFG["classifier"], "teach_every": 2, "embed": False}}
+    config.log({"prompt": "rancang ulang modul pembayaran"})
+    assert learn.teach_if_due(cfg) is None
+    config.log({"prompt": "audit keamanan login"})
+    assert learn.teach_if_due(cfg) == 2
+    assert learn.teach_lock().read_text(encoding="utf-8") == "done"
+    config.log({"prompt": "migrasi database lama"})
+    config.log({"prompt": "analisa race condition worker"})
+    assert learn.teach_if_due(cfg) is None
+
+
+def test_teacher_waits_while_another_run_holds_the_lock(monkeypatch):
+    monkeypatch.setattr(learn, "teach_due", REAL_TEACH_DUE)
+    monkeypatch.setattr(dispatch, "llm_classify_batch", lambda prompts, model: ["heavy"] * len(prompts))
+    cfg = {**CFG, "classifier": {**CFG["classifier"], "teach_every": 1, "embed": False}}
+    learn.teach_lock().parent.mkdir(parents=True, exist_ok=True)
+    learn.teach_lock().write_text("running", encoding="utf-8")
+    config.log({"prompt": "rancang ulang modul pembayaran"})
+    assert learn.teach_if_due(cfg) is None
+
+
+def test_failed_teacher_batch_is_split_and_retried(monkeypatch):
+    seen = []
+
+    def batch(prompts, model):
+        seen.append(len(prompts))
+        return [None] * len(prompts) if len(prompts) > 2 else ["heavy"] * len(prompts)
+
+    monkeypatch.setattr(dispatch, "llm_classify_batch", batch)
+    for text in ("audit login", "migrasi db", "rancang modul", "analisa worker", "refactor parser"):
+        config.log({"prompt": text})
+    assert learn.teach(CFG, lambda text: None) == 5
+    assert seen == [5, 2, 3, 1, 2]

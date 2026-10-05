@@ -158,6 +158,21 @@ def chat_cmd(provider: str, model: str, effort: str, session: str | None, files=
     raise ValueError(f"unknown provider: {provider}")
 
 
+REVIEW_TOOLS = "Read,Grep,Glob,Bash(git diff:*),Bash(git status:*),Bash(git log:*),Bash(git show:*)"
+
+
+def review_cmd(provider: str, model: str, effort: str) -> list[str]:
+    if provider == "claude":
+        cmd = claude_cmd() + [
+            "-p", "--model", model, "--effort", effort, "--no-session-persistence", "--allowedTools", REVIEW_TOOLS,
+            "--output-format", "stream-json", "--verbose", "--include-partial-messages"]
+        return cmd + [arg for root in chat_roots() for arg in ("--add-dir", root)]
+    if provider == "codex":
+        return codex_cmd() + ["exec", "-m", model, "-c", f"model_reasoning_effort={effort}", "--json",
+                              "--skip-git-repo-check", "--ephemeral", "-s", "read-only", "-"]
+    raise ValueError(f"no reviewer for provider: {provider}")
+
+
 def run(cmd: list[str], stdin_text: str | None, quiet_stderr: bool = False) -> int:
     if stdin_text is None:
         return subprocess.run(cmd).returncode

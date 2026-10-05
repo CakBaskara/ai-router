@@ -5,7 +5,7 @@ import sys
 import time
 from datetime import datetime
 
-from . import chat, config, dispatch, learn
+from . import chat, codex, config, dispatch, learn
 from .config import log, say, usage_today
 from .learn import TIERS, classify
 
@@ -22,7 +22,31 @@ def _parse(argv):
     p.add_argument("--ml", action="store_true", help="show what the local prompt classifier has learned")
     p.add_argument("--ml-train", action="store_true",
                    help="download the embedding model, let the teacher model label past prompts, then report")
+    p.add_argument("--quota", action="store_true", help="show the Claude and Codex usage left in the 5-hour and weekly windows")
     return p.parse_args(argv)
+
+
+def _clock(ts) -> str:
+    if not ts:
+        return "-"
+    when = datetime.fromtimestamp(ts)
+    return when.strftime("%H:%M" if when.date() == datetime.now().date() else "%d %b %H:%M")
+
+
+def quota_report(data: dict, now: float | None = None) -> str:
+    rows = []
+    for provider in ("claude", "codex"):
+        windows = data.get(provider) or {}
+        for key, label in (("5h", "5 jam"), ("week", "minggu")):
+            if key in windows:
+                left = config.quota_left(windows[key], now)
+                rows.append(f"{provider:<7} {label:<7} sisa {left:>3}%   reset {_clock(windows[key].get('resets'))}")
+        if windows:
+            rows.append(f"{'':<7} data dari {_clock(windows.get('at'))}")
+        else:
+            rows.append(f"{provider:<7} belum ada data" + (" (muncul setelah satu jawaban Claude di chat)"
+                                                            if provider == "claude" else ""))
+    return "\n".join(rows)
 
 
 def main(argv=None) -> int:
@@ -32,6 +56,11 @@ def main(argv=None) -> int:
     cfg = config.load()
     config.sync_rules()
     dispatch.load_user_env("GEMINI_API_KEY")
+
+    if args.quota:
+        config.save_quota("codex", config.codex_windows(codex.read_limits()))
+        print(quota_report(config.load_quota()))
+        return 0
 
     if args.ml or args.ml_train:
         c = cfg["classifier"]

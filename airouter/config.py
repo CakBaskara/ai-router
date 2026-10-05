@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import time
 import tomllib
 from collections import Counter
 from datetime import date
@@ -46,6 +47,64 @@ def usage_today() -> Counter:
         if entry.get("exit") == 0 and entry.get("provider"):
             counts[entry["provider"]] += 1
     return counts
+
+
+QUOTA_WINDOWS = (("5h", "5j"), ("week", "mgg"))
+
+
+def quota_path() -> Path:
+    return log_path().with_name("quota.json")
+
+
+def load_quota() -> dict:
+    try:
+        return json.loads(quota_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_quota(provider: str, windows: dict):
+    if not windows:
+        return
+    data = load_quota()
+    data[provider] = {"at": int(time.time()), **windows}
+    path = quota_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def claude_windows(info: dict) -> dict:
+    names = {"five_hour": "5h", "seven_day": "week"}
+    return {names[key]: {"used": w["utilization"] * 100, "resets": w.get("resetsAt")}
+            for key, w in (info.get("unifiedWindows") or {}).items()
+            if key in names and isinstance(w.get("utilization"), (int, float))}
+
+
+def codex_windows(limits: dict) -> dict:
+    names = {300: "5h", 10080: "week"}
+    return {names[w["windowDurationMins"]]: {"used": w.get("usedPercent", 0), "resets": w.get("resetsAt")}
+            for w in (limits.get("primary"), limits.get("secondary"))
+            if w and w.get("windowDurationMins") in names}
+
+
+def quota_left(window: dict, now: float | None = None) -> int:
+    if window.get("resets") and window["resets"] <= (now or time.time()):
+        return 100
+    return max(0, round(100 - window.get("used", 0)))
+
+
+def quota_line(data: dict | None = None, now: float | None = None) -> str:
+    data = load_quota() if data is None else data
+    parts = []
+    for provider in ("claude", "codex"):
+        windows = data.get(provider) or {}
+        left = [f"{label} {quota_left(windows[key], now)}%" for key, label in QUOTA_WINDOWS if key in windows]
+        if left:
+            parts.append(f"{provider} " + " · ".join(left))
+    return "  │  ".join(parts)
 
 
 RULES_HEADER = "<!-- Copied from ~/.claude/CLAUDE.md by `ai`. Edit that file instead; this copy is overwritten. -->\n\n"

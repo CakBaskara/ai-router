@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import attach, dispatch, learn
+from . import attach, config, dispatch, learn
 from .codex import CodexProc
 from .config import log, say, usage_today
 from .learn import TIERS, classify
@@ -115,6 +115,8 @@ class ClaudeTurn:
             for block in ev.get("message", {}).get("content", []):
                 if block.get("type") == "tool_use":
                     return "note", _tool(block.get("name"), block.get("input", {}))
+        elif kind == "rate_limit_event":
+            config.save_quota("claude", config.claude_windows(ev.get("rate_limit_info") or {}))
         elif kind == "result":
             u = ev.get("usage", {})
             cached = u.get("cache_read_input_tokens", 0)

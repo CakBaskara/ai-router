@@ -14,7 +14,7 @@ from textual.screen import ModalScreen
 from textual.theme import Theme
 from textual.widgets import Markdown, Static, TextArea, Tree
 
-from . import attach, config, learn
+from . import attach, codex, config, learn
 from .chat import HELP, Chat
 
 PICKER_ORDER = ("gemini", "copilot", "codex", "claude")
@@ -76,6 +76,7 @@ Screen .screen--selection { background: #264F78; }
 #top { height: 1; background: ansi_default; padding: 0 1; }
 #brand { width: auto; color: #CCCCCC; text-style: bold; }
 #cwd { width: 1fr; color: #9D9D9D; padding: 0 2; }
+#quota { width: auto; color: #9D9D9D; padding: 0 1; }
 #model { width: auto; color: #CCCCCC; padding: 0 1; }
 #model:hover { background: #2B2B2B; }
 #body { height: 1fr; background: ansi_default; }
@@ -421,6 +422,7 @@ class ChatApp(App):
         with Horizontal(id="top"):
             yield Static("✻ ai", id="brand")
             yield Static(os.getcwd(), id="cwd", markup=False)
+            yield Static("", id="quota", markup=False)
             yield ModelChip("", id="model", markup=False)
         with Vertical(id="body"):
             with Horizontal(classes="arrows"):
@@ -466,6 +468,8 @@ class ChatApp(App):
             self.call_after_refresh(self.after_send)
         self.warm_catalog()
         self.warm_classifier()
+        self.warm_quota()
+        self.set_interval(30, self.refresh_quota)
         self.chat.prewarm()
         self.set_interval(2, self.check_code)
         self.set_interval(0.1, self.inject_queued)
@@ -512,6 +516,15 @@ class ChatApp(App):
         self.chat.catalog()
 
     @work(thread=True)
+    def warm_quota(self):
+        config.save_quota("codex", config.codex_windows(codex.read_limits()))
+        self.call_from_thread(self.refresh_quota)
+
+    def refresh_quota(self):
+        for widget in self.query("#quota"):
+            widget.update(config.quota_line())
+
+    @work(thread=True)
     def warm_classifier(self):
         if self.chat.cfg["classifier"].get("embed", True):
             learn.warm_encoder(self.chat.ui.info)
@@ -520,6 +533,7 @@ class ChatApp(App):
         queued = f"  ·  antre {len(self.queue)}" if self.queue else ""
         model = self.reply.model if self.busy and self.reply else self.chat.label()
         self.query_one("#model", Static).update(f"◆ {model} ▾{queued}")
+        self.refresh_quota()
 
     def refresh_sticky(self):
         logs = self.query("#log")

@@ -376,3 +376,30 @@ def test_sentences_about_other_things_are_not_switches():
                 "apa bedanya model codex dan claude?",
                 "tolong ubah fungsi ini supaya lebih ringan"):
         assert c.switch_command(msg) is None, msg
+
+
+def test_claude_rate_limit_event_saves_quota():
+    turn = ClaudeTurn()
+    turn.feed({"type": "rate_limit_event", "rate_limit_info": {"unifiedWindows": {
+        "five_hour": {"utilization": 0.28, "resetsAt": 4102444800},
+        "seven_day": {"utilization": 0.02, "resetsAt": 4102444800}}}})
+    assert config.quota_line() == "claude 5j 72% · mgg 98%"
+
+
+def test_codex_limits_map_by_window_length():
+    windows = config.codex_windows({"primary": {"usedPercent": 40, "windowDurationMins": 300, "resetsAt": 10},
+                                    "secondary": {"usedPercent": 5, "windowDurationMins": 10080, "resetsAt": 99}})
+    assert windows == {"5h": {"used": 40, "resets": 10}, "week": {"used": 5, "resets": 99}}
+    assert config.quota_line({"codex": windows}, now=50) == "codex 5j 100% · mgg 95%"
+
+
+def test_empty_limits_keep_previous_quota():
+    config.save_quota("codex", {"5h": {"used": 10, "resets": None}})
+    config.save_quota("codex", config.codex_windows({}))
+    assert config.quota_line() == "codex 5j 90%"
+
+
+def test_quota_report_lists_both_providers():
+    from airouter.cli import quota_report
+    text = quota_report({"codex": {"at": 0, "5h": {"used": 25, "resets": 4102444800}}})
+    assert "codex   5 jam   sisa  75%" in text and "claude  belum ada data" in text

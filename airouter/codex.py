@@ -4,7 +4,7 @@ import queue
 import subprocess
 import threading
 
-from . import attach, dispatch
+from . import attach, config, dispatch
 
 
 class CodexProc:
@@ -91,6 +91,9 @@ class CodexProc:
                     self._write({"id": message["id"], "error": {
                         "code": -32601, "message": "ai-router does not support this client request"}})
                 else:
+                    if message.get("method") == "account/rateLimits/updated":
+                        limits = (message.get("params") or {}).get("rateLimits") or {}
+                        config.save_quota("codex", config.codex_windows(limits))
                     self.events.put(message)
         finally:
             with self.lock:
@@ -216,3 +219,44 @@ class CodexProc:
     def close(self):
         if self.alive():
             self.proc.kill()
+
+
+def read_limits(timeout: float = 20) -> dict:
+    try:
+        proc = subprocess.Popen(dispatch.codex_server_cmd(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL)
+    except OSError:
+        return {}
+    result = {}
+
+    def send(message):
+        proc.stdin.write((json.dumps(message) + "\n").encode("utf-8"))
+        proc.stdin.flush()
+
+    def reply(request_id):
+        for raw in proc.stdout:
+            try:
+                message = json.loads(raw.decode("utf-8", "replace"))
+            except json.JSONDecodeError:
+                continue
+            if message.get("id") == request_id and "method" not in message:
+                return message
+        return {}
+
+    # Closing stdin early makes the app-server exit before it answers, so wait for each reply.
+    def talk():
+        try:
+            send({"id": 1, "method": "initialize", "params": {"clientInfo": {
+                "name": "ai-router", "title": "ai-router", "version": "0.1.0"}}})
+            reply(1)
+            send({"method": "initialized", "params": {}})
+            send({"id": 2, "method": "account/rateLimits/read", "params": {}})
+            result.update(reply(2).get("result") or {})
+        except (OSError, ValueError):
+            pass
+
+    worker = threading.Thread(target=talk, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    proc.kill()
+    return result.get("rateLimits") or {}

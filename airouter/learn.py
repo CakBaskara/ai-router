@@ -4,12 +4,202 @@ import math
 import os
 import random
 import re
+import threading
 import time
+import urllib.request
 from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import config, dispatch, embed
-from .classify import TIERS, _looks_like_code
+from . import config, dispatch
+
+TIERS = ("light", "medium", "heavy")
+
+
+@dataclass
+class Verdict:
+    tier: str
+    score: int
+    reasons: list[str] = field(default_factory=list)
+    ambiguous: bool = False
+
+
+def _hits(text: str, words: list[str]) -> list[str]:
+    return [w for w in words if re.search(r"(?<!\w)" + re.escape(w.lower()), text)]
+
+
+def _looks_like_code(prompt: str) -> bool:
+    if "```" in prompt or "Traceback" in prompt:
+        return True
+    if re.search(r"^\s+at \S+", prompt, re.M):
+        return True
+    return prompt.count("\n") >= 10
+
+
+def classify(prompt: str, rules: dict, repo: bool = False) -> Verdict:
+    text = prompt.lower()
+    score = 0
+    reasons = []
+
+    words = len(prompt.split())
+    if words >= 150:
+        score += 2
+        reasons.append(f"{words} words")
+    elif words >= 50:
+        score += 1
+        reasons.append(f"{words} words")
+
+    if _looks_like_code(prompt):
+        score += 1
+        reasons.append("code or log")
+
+    heavy = _hits(text, rules.get("heavy", []))
+    medium = _hits(text, rules.get("medium", []))
+    light = _hits(text, rules.get("light", []))
+    if heavy:
+        score += 3
+        reasons.append("heavy: " + ", ".join(heavy))
+    if medium:
+        score += 1
+        reasons.append("medium: " + ", ".join(medium))
+    if light and not heavy:
+        score -= 1
+        reasons.append("light: " + ", ".join(light))
+
+    if repo:
+        score += 1
+        reasons.append("repo session")
+
+    tier = "light" if score <= 0 else "medium" if score <= 2 else "heavy"
+    ambiguous = not (heavy or medium or light)
+    return Verdict(tier, score, reasons, ambiguous)
+
+
+MODEL_REPO = "ibm-granite/granite-embedding-97m-multilingual-r2"
+MODEL_REVISION = "835ad14087e140460703cf0fae09f97d469d65c2"
+MODEL_FILES = {"model.onnx": "onnx/model_quint8_avx2.onnx", "tokenizer.json": "tokenizer.json"}
+MAX_TOKENS = 512
+
+_lock = threading.Lock()
+_encoder = None
+_failed = None
+_vectors = {}
+_CACHE_SAVE_BATCH = 64
+
+
+def model_folder() -> Path:
+    return Path(os.environ.get("AI_ROUTER_MODELS", config.REPO_ROOT / "logs" / "models")) / MODEL_REPO.split("/")[1]
+
+
+def model_present() -> bool:
+    return all((model_folder() / name).exists() for name in MODEL_FILES)
+
+
+def download_model(info=lambda text: None):
+    dest = model_folder()
+    dest.mkdir(parents=True, exist_ok=True)
+    for name, remote in MODEL_FILES.items():
+        target = dest / name
+        if target.exists():
+            continue
+        info(f"mengunduh {MODEL_REPO} {remote}...")
+        part = target.with_suffix(".part")
+        urllib.request.urlretrieve(f"https://huggingface.co/{MODEL_REPO}/resolve/{MODEL_REVISION}/{remote}", part)
+        part.replace(target)
+
+
+class Encoder:
+    def __init__(self, path: Path):
+        import numpy as np
+        import onnxruntime as ort
+        from tokenizers import Tokenizer
+
+        self.np = np
+        self.tok = Tokenizer.from_file(str(path / "tokenizer.json"))
+        self.tok.enable_truncation(MAX_TOKENS)
+        self.tok.enable_padding()
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = min(4, os.cpu_count() or 1)
+        opts.log_severity_level = 3
+        self.sess = ort.InferenceSession(str(path / "model.onnx"), opts, providers=["CPUExecutionProvider"])
+        self.inputs = {i.name for i in self.sess.get_inputs()}
+
+    def __call__(self, texts: list[str]):
+        np = self.np
+        enc = self.tok.encode_batch(texts)
+        ids = np.array([e.ids for e in enc], dtype=np.int64)
+        feed = {"input_ids": ids, "attention_mask": np.array([e.attention_mask for e in enc], dtype=np.int64),
+                "token_type_ids": np.zeros_like(ids)}
+        cls = self.sess.run(None, {k: v for k, v in feed.items() if k in self.inputs})[0][:, 0]
+        return cls / np.linalg.norm(cls, axis=1, keepdims=True)
+
+
+def get_encoder(wait: bool = True):
+    global _encoder, _failed
+    if _encoder or _failed:
+        return _encoder
+    if not _lock.acquire(blocking=wait):
+        return None
+    try:
+        if not (_encoder or _failed) and model_present():
+            try:
+                _encoder = Encoder(model_folder())
+            except Exception as exc:
+                _failed = str(exc)
+    finally:
+        _lock.release()
+    return _encoder
+
+
+def warm_encoder(info=lambda text: None):
+    try:
+        if not model_present():
+            download_model(info)
+    except OSError as exc:
+        info(f"model klasifikasi tidak bisa diunduh, pakai Naive Bayes: {exc}")
+        return None
+    return get_encoder()
+
+
+def _key(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def vectors_path() -> Path:
+    return labels_path().with_name("ml_vectors.npz")
+
+
+def _save_vectors(cache: dict[str, object], path: Path):
+    import numpy as np
+    if not cache:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(path, keys=np.array(list(cache.keys())), vecs=np.stack(list(cache.values())))
+    except (OSError, ValueError):
+        pass
+
+
+def vectors(texts: list[str], encoder):
+    import numpy as np
+    disk = isinstance(encoder, Encoder)
+    cache = _vectors.setdefault(id(encoder), {})
+    if disk and not cache and vectors_path().exists():
+        try:
+            with np.load(vectors_path()) as saved:
+                cache.update(zip(saved["keys"].tolist(), saved["vecs"]))
+        except (OSError, ValueError, KeyError):
+            pass
+    keys = [_key(t) for t in texts]
+    missing = list(dict.fromkeys(t for t, k in zip(texts, keys) if k not in cache))
+    before = len(cache)
+    for i in range(0, len(missing), 16):
+        batch = missing[i:i + 16]
+        cache.update(zip(map(_key, batch), encoder(batch)))
+    if missing and disk and (len(cache) - before >= _CACHE_SAVE_BATCH or not vectors_path().exists()):
+        _save_vectors(cache, vectors_path())
+    return np.stack([cache[k] for k in keys])
+
 
 SEED = Path(__file__).with_name("seed_labels.jsonl")
 WEIGHTS = {"seed": 1.0, "llm": 1.0, "audit": 1.0, "teacher": 2.0, "user": 3.0}
@@ -122,7 +312,7 @@ class Learner:
 
     def predict(self, text: str) -> tuple[str | None, float]:
         if self.encoder and len({r["tier"] for r in self.rows}) > 1:
-            probs = self._classifier(self.rows)(embed.vectors([text], self.encoder))[0]
+            probs = self._classifier(self.rows)(vectors([text], self.encoder))[0]
             best = int(probs.argmax())
             return TIERS[best], float(probs[best])
         return self._bayes(text)
@@ -132,7 +322,7 @@ class Learner:
         key = (id(self.encoder), hashlib.sha1(json.dumps(
             [(r["text"], r["tier"], r.get("source")) for r in rows]).encode("utf-8")).hexdigest())
         if key not in _trained:
-            X = embed.vectors([r["text"] for r in rows], self.encoder)
+            X = vectors([r["text"] for r in rows], self.encoder)
             y = np.array([TIERS.index(r["tier"]) for r in rows])
             w = np.array([WEIGHTS.get(r.get("source"), 1.0) for r in rows])
             if len(_trained) > 8:
@@ -187,7 +377,7 @@ class Learner:
             test = [r for i, r in enumerate(self.rows) if i % FOLDS == k]
             if not test or len({r["tier"] for r in train}) < 2:
                 continue
-            probs = self._classifier(train)(embed.vectors([r["text"] for r in test], self.encoder))
+            probs = self._classifier(train)(vectors([r["text"] for r in test], self.encoder))
             out += [(float(p.max()), TIERS[int(p.argmax())], r["tier"]) for p, r in zip(probs, test)]
         return out
 
@@ -311,7 +501,7 @@ def teach(cfg: dict, info, batch: int = 25) -> int:
 
 def judge(prompt: str, cfg: dict, info, use_llm: bool = True, wait: bool = True) -> tuple[str | None, str | None, bool]:
     c = cfg["classifier"]
-    model = Learner.load(embed.get(wait) if c.get("embed", True) else None)
+    model = Learner.load(get_encoder(wait) if c.get("embed", True) else None)
     tier, prob = model.predict(prompt)
     if tier and len(model.rows) >= c.get("ml_min_labels", 30) \
             and prob >= model.cached_threshold(c.get("ml_target_accuracy", 0.9)):

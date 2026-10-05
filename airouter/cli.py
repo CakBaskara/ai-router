@@ -5,9 +5,9 @@ import sys
 import time
 from datetime import datetime
 
-from . import chat, config, dispatch, embed, learn, rules
-from .classify import TIERS, classify
-from .journal import log, say, usage_today
+from . import chat, config, dispatch, learn
+from .config import log, say, usage_today
+from .learn import TIERS, classify
 
 
 def _parse(argv):
@@ -30,15 +30,15 @@ def main(argv=None) -> int:
         stream.reconfigure(encoding="utf-8")
     args = _parse(argv if argv is not None else sys.argv[1:])
     cfg = config.load()
-    rules.sync()
+    config.sync_rules()
     dispatch.load_user_env("GEMINI_API_KEY")
 
     if args.ml or args.ml_train:
         c = cfg["classifier"]
         if args.ml_train:
-            embed.warm(lambda text: say(f"· {text}"))
+            learn.warm_encoder(lambda text: say(f"· {text}"))
             say(f"· {learn.teach(cfg, lambda text: say(f'· {text}'))} label baru dari guru")
-        encoder = embed.get() if c.get("embed", True) else None
+        encoder = learn.get_encoder() if c.get("embed", True) else None
         print(json.dumps(learn.Learner.load(encoder).report(c.get("ml_target_accuracy", 0.9)), indent=2))
         return 0
 

@@ -4,13 +4,17 @@ import subprocess
 import time
 import zlib
 
+import pytest
+
 import numpy as np
 
-from airouter import config, dispatch, embed, learn
+from airouter import config, dispatch, learn
 from airouter.chat import Chat
-from airouter.learn import Learner
+from airouter.learn import Learner, classify
 
 CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing")}, "providers": ["claude", "codex"]}
+
+RULES = config.load()["rules"]
 
 
 def fake_encoder(texts):
@@ -61,7 +65,7 @@ def test_logreg_respects_source_weights():
 
 
 def test_judge_uses_encoder_when_ready(monkeypatch):
-    monkeypatch.setattr(embed, "get", lambda wait=True: fake_encoder)
+    monkeypatch.setattr(learn, "get_encoder", lambda wait=True: fake_encoder)
     monkeypatch.setattr(learn, "_read", lambda path: TRAIN if path == learn.SEED else [])
     monkeypatch.setattr(Learner, "cached_threshold", lambda self, target: 0.5)
     monkeypatch.setattr(dispatch, "llm_classify", lambda *a: None)
@@ -118,8 +122,113 @@ def test_audit_rate_from_config():
     assert 60 < hits < 140
 
 
+@pytest.mark.parametrize("prompt, tier", [
+    ("apa itu decorator di python?", "light"),
+    ("translate 'retry on transport errors' ke bahasa indonesia", "light"),
+    ("perbaiki error di fungsi parse_period", "medium"),
+    ("tambah test untuk PERIOD_API", "medium"),
+    ("kenapa mic ISO kehilangan frame tiap 160 detik? cari root cause", "heavy"),
+    ("rancang arsitektur router multi-model dengan fallback", "heavy"),
+    ("rancang arsitektur cache yang tahan restart, cukup 3 poin singkat", "heavy"),
+])
+def test_tier(prompt, tier):
+    assert classify(prompt, RULES).tier == tier
+
+
+def test_no_keyword_is_ambiguous():
+    assert classify("joypad dongle hari ini", RULES).ambiguous
+
+
+def test_keyword_is_not_ambiguous():
+    assert not classify("apa itu LC3", RULES).ambiguous
+
+
+def test_repo_session_raises_tier():
+    assert classify("apa itu LC3", RULES).score < classify("apa itu LC3", RULES, repo=True).score
+
+
+def test_traceback_counts_as_code():
+    prompt = "Traceback (most recent call last):\n  File \"x.py\", line 1\nValueError"
+    assert "code or log" in classify(prompt, RULES).reasons
+
+
+def test_config_with_bom_loads(tmp_path, monkeypatch):
+    path = tmp_path / "config.toml"
+    path.write_bytes(b"\xef\xbb\xbf" + config.PACKAGE_CONFIG.read_bytes())
+    monkeypatch.setenv("AI_ROUTER_CONFIG", str(path))
+    assert "claude" in config.load()["providers"]
+
+
+def test_keyword_needs_word_start():
+    assert not classify("cdebugger", RULES).reasons
+
+
+def test_learns_from_examples():
+    m = Learner(rows(("halo apa kabar", "light"), ("halo selamat pagi", "light"),
+                     ("rancang arsitektur sistem baru", "heavy"), ("rancang ulang arsitektur modul", "heavy")))
+    assert m.predict("halo semua")[0] == "light"
+    assert m.predict("tolong rancang arsitektur")[0] == "heavy"
+
+
+def test_add_persists_and_reloads():
+    m = Learner.load()
+    before = len(m.rows)
+    m.add("joypad dongle hari ini", "heavy", "user")
+    assert learn.labels_path().exists()
+    assert len(Learner.load().rows) == before + 1
+
+
+def test_user_label_outweighs_seed():
+    m = Learner(rows(("cek status dongle", "light")))
+    m._fit({"text": "cek status dongle", "tier": "heavy", "source": "user"})
+    assert m.predict("cek status dongle")[0] == "heavy"
+
+
+def test_threshold_never_when_unreliable():
+    m = Learner(rows(("a b", "light"), ("a b", "heavy")))
+    assert m.threshold(0.9) == learn.NEVER
+
+
+def test_seed_report_has_numbers():
+    report = Learner.load().report(0.9)
+    assert report["labels"] >= 30 and report["accuracy_all"] is not None
+
+
+def test_judge_skips_llm_when_confident(monkeypatch):
+    calls = []
+    monkeypatch.setattr(learn.dispatch, "llm_classify", lambda *a: calls.append(a) or "medium")
+    monkeypatch.setattr(Learner, "cached_threshold", lambda self, target: 0.5)
+    tier, why, llm = learn.judge("halo", CFG, lambda t: None)
+    assert tier == "light" and why.startswith("ml:") and not llm and not calls
+
+
+def test_judge_asks_llm_and_learns_when_unsure(monkeypatch):
+    monkeypatch.setattr(learn.dispatch, "llm_classify", lambda *a: "heavy")
+    monkeypatch.setattr(Learner, "cached_threshold", lambda self, target: learn.NEVER)
+    tier, why, llm = learn.judge("joypad dongle hari ini", CFG, lambda t: None)
+    assert (tier, llm) == ("heavy", True)
+    assert Learner.load().rows[-1] == {"text": "joypad dongle hari ini", "tier": "heavy", "source": "llm"}
+
+
+def test_tier_change_after_answer_is_recorded_as_correction():
+    c = Chat(CFG, use_llm=False)
+    c.transcript = [("User", "cek dongle"), ("Assistant", "ok")]
+    c.tier = "medium"
+    c.command("/model heavy")
+    assert Learner.load().rows[-1] == {"text": "cek dongle", "tier": "heavy", "source": "user"}
+
+
+def test_model_pick_maps_to_tier_for_correction():
+    c = Chat(CFG, use_llm=False)
+    c._catalog = [("claude", "opus")]
+    c.transcript = [("User", "cek dongle"), ("Assistant", "ok")]
+    c.tier = "medium"
+    c.command("/model opus")
+    assert Learner.load().rows[-1]["tier"] == "heavy"
+
+
 def test_vector_cache_survives_restart():
-    class Disk(embed.Encoder):
+    class Disk(learn.Encoder):
         def __init__(self):
             self.encoded = 0
 
@@ -128,6 +237,6 @@ def test_vector_cache_survives_restart():
             return fake_encoder(texts)
 
     first, second = Disk(), Disk()
-    embed.vectors(["halo apa kabar"], first)
-    embed.vectors(["halo apa kabar"], second)
+    learn.vectors(["halo apa kabar"], first)
+    learn.vectors(["halo apa kabar"], second)
     assert (first.encoded, second.encoded) == (1, 0)

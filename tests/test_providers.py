@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from airouter import config, dispatch, journal
+from airouter import config, dispatch
 from airouter.chat import Chat, CopilotTurn, GeminiTurn, lineup
 
 CFG = {k: v for k, v in config.load().items() if k != "chat"}
@@ -70,10 +70,10 @@ def test_free_provider_does_not_keep_heavy_message():
 
 
 def test_usage_today_counts_successful_runs():
-    journal.log({"ts": datetime.now().isoformat(timespec="seconds"), "provider": "codex", "exit": 0})
-    journal.log({"ts": datetime.now().isoformat(timespec="seconds"), "provider": "codex", "exit": 1})
-    journal.log({"ts": "2000-01-01T00:00:00", "provider": "claude", "exit": 0})
-    assert journal.usage_today() == {"codex": 1}
+    config.log({"ts": datetime.now().isoformat(timespec="seconds"), "provider": "codex", "exit": 0})
+    config.log({"ts": datetime.now().isoformat(timespec="seconds"), "provider": "codex", "exit": 1})
+    config.log({"ts": "2000-01-01T00:00:00", "provider": "claude", "exit": 0})
+    assert config.usage_today() == {"codex": 1}
 
 
 def test_chat_cmds_for_free_providers():
@@ -118,3 +118,22 @@ def test_empty_answer_falls_back_to_next_provider():
     c.pinned_tier = "light"
     assert c.send("halo", runner=runner) == 0
     assert len(calls) == 2 and c.provider == "copilot" and c.transcript[-1] == ("Assistant", "ok")
+
+
+def test_sync_copies_claude_rules_to_other_agents(tmp_path, monkeypatch):
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "CLAUDE.md").write_text("# rules\n- talk in Bahasa Indonesia\n", encoding="utf-8")
+    changed = config.sync_rules()
+    assert len(changed) == 2
+    for target in config.rules_targets():
+        text = target.read_text(encoding="utf-8")
+        assert text.startswith(config.RULES_HEADER) and "Bahasa Indonesia" in text
+    assert config.sync_rules() == []
+
+
+def test_sync_without_source_does_nothing(tmp_path, monkeypatch):
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert config.sync_rules() == []

@@ -11,8 +11,8 @@ from pathlib import Path
 
 from . import attach, dispatch, learn
 from .codex import CodexProc
-from .classify import TIERS, classify
-from .journal import log, say, usage_today
+from .config import log, say, usage_today
+from .learn import TIERS, classify
 
 HELP = (
     "/new                      percakapan baru\n"

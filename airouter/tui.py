@@ -14,13 +14,13 @@ from textual.screen import ModalScreen
 from textual.theme import Theme
 from textual.widgets import Markdown, Static, TextArea, Tree
 
-from . import attach, config, embed
+from . import attach, config, learn
 from .chat import HELP, Chat
 
 PICKER_ORDER = ("gemini", "copilot", "codex", "claude")
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 PACKAGE = Path(__file__).parent
-MODULES = ("config", "classify", "journal", "attach", "embed", "dispatch", "learn", "codex", "chat", "tui")
+MODULES = ("config", "attach", "dispatch", "learn", "codex", "chat", "tui")
 
 
 def _watched() -> list[Path]:
@@ -514,7 +514,7 @@ class ChatApp(App):
     @work(thread=True)
     def warm_classifier(self):
         if self.chat.cfg["classifier"].get("embed", True):
-            embed.warm(self.chat.ui.info)
+            learn.warm_encoder(self.chat.ui.info)
 
     def refresh_status(self):
         queued = f"  ·  antre {len(self.queue)}" if self.queue else ""
@@ -775,5 +775,7 @@ def run(cfg: dict, provider: str | None = None, tier: str | None = None, use_llm
             return 0
         state = app.chat.snapshot()
         for name in MODULES:
-            importlib.reload(sys.modules[f"{__package__}.{name}"])
+            loaded = sys.modules.get(f"{__package__}.{name}")
+            if loaded and Path(loaded.__file__).exists():
+                importlib.reload(loaded)
         cfg = sys.modules[f"{__package__}.config"].load()

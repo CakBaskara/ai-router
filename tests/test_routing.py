@@ -13,6 +13,7 @@ from airouter.chat import Chat
 from airouter.learn import Learner, classify
 
 REAL_TEACH_DUE = learn.teach_due
+FREE = {"free_tiers": ["light", "medium"]}
 CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing", "loop")}, "providers": ["claude", "codex"]}
 
 RULES = config.load()["rules"]
@@ -56,7 +57,7 @@ def test_embedding_classifier_predicts_and_cross_validates():
     assert m.predict("rancang arsitektur baru")[0] == "heavy"
     assert m.predict("halo apa kabar")[0] == "light"
     cv = m.cross_val()
-    assert len(cv) == len(TRAIN) and sum(g == t for _, g, t in cv) / len(cv) >= 0.9
+    assert len(cv) == len(TRAIN) and sum(max(p, key=p.get) == t for p, t in cv) / len(cv) >= 0.9
 
 
 def test_logreg_respects_source_weights():
@@ -68,9 +69,9 @@ def test_logreg_respects_source_weights():
 def test_judge_uses_encoder_when_ready(monkeypatch):
     monkeypatch.setattr(learn, "get_encoder", lambda wait=True: fake_encoder)
     monkeypatch.setattr(learn, "_read", lambda path: TRAIN if path == learn.SEED else [])
-    monkeypatch.setattr(Learner, "cached_threshold", lambda self, target: 0.5)
+    monkeypatch.setattr(Learner, "cached_gate", lambda self, *a: (0.1, 0.5))
     monkeypatch.setattr(dispatch, "llm_classify", lambda *a: None)
-    cfg = {**CFG, "classifier": {**CFG["classifier"], "ml_min_labels": 10}}
+    cfg = {**CFG, "routing": FREE, "classifier": {**CFG["classifier"], "ml_min_labels": 10}}
     tier, why, llm = learn.judge("rancang arsitektur modul", cfg, lambda t: None)
     assert (tier, llm) == ("heavy", False) and why.startswith("ml:")
 
@@ -185,27 +186,43 @@ def test_user_label_outweighs_seed():
     assert m.predict("cek status dongle")[0] == "heavy"
 
 
-def test_threshold_never_when_unreliable():
+def test_gate_never_decides_when_unreliable():
     m = Learner(rows(("a b", "light"), ("a b", "heavy")))
-    assert m.threshold(0.9) == learn.NEVER
+    assert m.gate({"heavy"}, 0.05, 0.7) == (-1.0, learn.NEVER)
+
+
+def test_gate_keeps_misses_and_precision_within_limits():
+    cv = [({"light": 1 - s, "medium": 0.0, "heavy": s}, tier) for s, tier in [
+        (0.02, "light"), (0.05, "medium"), (0.08, "light"), (0.1, "light"), (0.12, "medium"), (0.3, "heavy"),
+        (0.4, "light"), (0.6, "heavy"), (0.7, "heavy"), (0.75, "medium"), (0.8, "heavy"), (0.9, "heavy")]]
+    low, high = Learner().gate({"heavy"}, 0.05, 0.7, cv)
+    assert (low, high) == (0.12, 0.3)
+
+
+def test_decide_picks_within_the_trusted_side():
+    probs = {"light": 0.3, "medium": 0.5, "heavy": 0.2}
+    assert learn.decide(probs, 0.25, 0.8, {"heavy"}) == "medium"
+    assert learn.decide(probs, 0.1, 0.8, {"heavy"}) is None
+    assert learn.decide(probs, 0.1, 0.2, {"heavy"}) == "heavy"
 
 
 def test_seed_report_has_numbers():
-    report = Learner.load().report(0.9)
+    report = Learner.load().report({**CFG, "routing": FREE})
     assert report["labels"] >= 30 and report["accuracy_all"] is not None
+    assert {"gate", "ml_decides", "paid_caught_by_ml", "paid_sent_free_by_ml"} <= set(report)
 
 
 def test_judge_skips_llm_when_confident(monkeypatch):
     calls = []
     monkeypatch.setattr(learn.dispatch, "llm_classify", lambda *a: calls.append(a) or "medium")
-    monkeypatch.setattr(Learner, "cached_threshold", lambda self, target: 0.5)
-    tier, why, llm = learn.judge("halo", CFG, lambda t: None)
+    monkeypatch.setattr(Learner, "cached_gate", lambda self, *a: (0.5, learn.NEVER))
+    tier, why, llm = learn.judge("halo", {**CFG, "routing": FREE}, lambda t: None)
     assert tier == "light" and why.startswith("ml:") and not llm and not calls
 
 
 def test_judge_asks_llm_and_learns_when_unsure(monkeypatch):
     monkeypatch.setattr(learn.dispatch, "llm_classify", lambda *a: "heavy")
-    monkeypatch.setattr(Learner, "cached_threshold", lambda self, target: learn.NEVER)
+    monkeypatch.setattr(Learner, "cached_gate", lambda self, *a: (-1.0, learn.NEVER))
     tier, why, llm = learn.judge("joypad dongle hari ini", CFG, lambda t: None)
     assert (tier, llm) == ("heavy", True)
     assert Learner.load().rows[-1] == {"text": "joypad dongle hari ini", "tier": "heavy", "source": "llm"}
@@ -279,3 +296,21 @@ def test_failed_teacher_batch_is_split_and_retried(monkeypatch):
         config.log({"prompt": text})
     assert learn.teach(CFG, lambda text: None) == 5
     assert seen == [5, 2, 3, 1, 2]
+
+
+def test_tuning_keeps_only_settings_that_score_better(monkeypatch):
+    best = {"c": 16.0, "balanced": True}
+    scores = {json.dumps(s, sort_keys=True): (0.1, 0.0) for s in learn.SETTINGS_GRID}
+    scores[json.dumps(best, sort_keys=True)] = (0.5, 0.3)
+    monkeypatch.setattr(Learner, "score", lambda self, cfg, cv=None: scores[json.dumps(self.settings, sort_keys=True)])
+    first = Learner(TRAIN, fake_encoder).tune(CFG)
+    assert first["changed"] and first["settings"] == best and learn.load_settings() == best
+    again = Learner(TRAIN, fake_encoder).tune(CFG)
+    assert not again["changed"] and learn.load_settings() == best
+
+
+def test_balanced_settings_change_the_trained_model():
+    skewed = TRAIN + rows(*[(f"halo lagi {i}", "light") for i in range(30)])
+    plain = Learner(skewed, fake_encoder, {"c": 4.0, "balanced": False}).probs("rancang sistem")
+    balanced = Learner(skewed, fake_encoder, {"c": 4.0, "balanced": True}).probs("rancang sistem")
+    assert balanced["heavy"] > plain["heavy"]

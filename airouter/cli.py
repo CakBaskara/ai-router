@@ -74,7 +74,8 @@ def main(argv=None) -> int:
             learn.warm_encoder(lambda text: say(f"· {text}"))
             say(f"· {learn.teach(cfg, lambda text: say(f'· {text}'))} label baru dari guru")
         encoder = learn.get_encoder() if c.get("embed", True) else None
-        print(json.dumps(learn.Learner.load(encoder).report(c.get("ml_target_accuracy", 0.9)), indent=2))
+        result = learn.retrain(cfg, encoder) if args.ml_train else learn.Learner.load(encoder).report(cfg)
+        print(json.dumps(result, indent=2))
         return 0
 
     prompt = " ".join(args.prompt).strip()

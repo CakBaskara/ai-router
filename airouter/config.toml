@@ -8,8 +8,11 @@ free_tiers = ["light", "medium"]
 [classifier]
 llm_fallback = true
 model = "haiku"
-# The local model decides alone only above the confidence that kept its held-out accuracy at this level.
-ml_target_accuracy = 0.9
+# The local model decides alone only where its held-out decisions kept both limits; the rest goes to the model above.
+# At most this share of the prompts that needed a paid tier may be sent to a free tier by it.
+ml_max_miss = 0.05
+# Paid-tier decisions must be right at least this often.
+ml_min_precision = 0.7
 ml_min_labels = 30
 # Granite Embedding 97M multilingual (ONNX, ~120 MB in logs/models) replaces Naive Bayes once it is loaded.
 embed = true

@@ -205,11 +205,25 @@ SEED = Path(__file__).with_name("seed_labels.jsonl")
 WEIGHTS = {"seed": 1.0, "llm": 1.0, "audit": 1.0, "teacher": 2.0, "user": 3.0}
 RANK = {"seed": 0, "llm": 1, "audit": 1, "teacher": 2, "user": 3}
 FOLDS = 5
+DEFAULT_SETTINGS = {"c": 4.0, "balanced": False}
+SETTINGS_GRID = [{"c": c, "balanced": b} for c in (1.0, 4.0, 16.0) for b in (False, True)]
 _trained = {}
 
 
 def labels_path() -> Path:
     return Path(os.environ.get("AI_ROUTER_LABELS", config.REPO_ROOT / "logs" / "labels.jsonl"))
+
+
+def settings_path() -> Path:
+    return labels_path().with_name("ml_settings.json")
+
+
+def load_settings() -> dict:
+    try:
+        saved = json.loads(settings_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return dict(DEFAULT_SETTINGS)
+    return {k: saved.get(k, v) for k, v in DEFAULT_SETTINGS.items()}
 
 
 def features(text: str) -> list[str]:
@@ -281,8 +295,9 @@ def _read(path: Path) -> list[dict]:
 
 
 class Learner:
-    def __init__(self, rows: list[dict] = (), encoder=None):
+    def __init__(self, rows: list[dict] = (), encoder=None, settings: dict | None = None):
         self.encoder = encoder
+        self.settings = settings or load_settings()
         self.rows = []
         self.prior = Counter()
         self.counts = defaultdict(Counter)
@@ -310,30 +325,38 @@ class Learner:
         if sign > 0:
             self.rows.append(row)
 
-    def predict(self, text: str) -> tuple[str | None, float]:
+    def probs(self, text: str) -> dict[str, float]:
         if self.encoder and len({r["tier"] for r in self.rows}) > 1:
-            probs = self._classifier(self.rows)(vectors([text], self.encoder))[0]
-            best = int(probs.argmax())
-            return TIERS[best], float(probs[best])
+            return dict(zip(TIERS, map(float, self._classifier(self.rows)(vectors([text], self.encoder))[0])))
         return self._bayes(text)
+
+    def predict(self, text: str) -> tuple[str | None, float]:
+        probs = self.probs(text)
+        if not probs:
+            return None, 0.0
+        best = max(probs, key=probs.get)
+        return best, probs[best]
 
     def _classifier(self, rows: list[dict]):
         import numpy as np
-        key = (id(self.encoder), hashlib.sha1(json.dumps(
+        key = (id(self.encoder), json.dumps(self.settings, sort_keys=True), hashlib.sha1(json.dumps(
             [(r["text"], r["tier"], r.get("source")) for r in rows]).encode("utf-8")).hexdigest())
         if key not in _trained:
             X = vectors([r["text"] for r in rows], self.encoder)
             y = np.array([TIERS.index(r["tier"]) for r in rows])
             w = np.array([WEIGHTS.get(r.get("source"), 1.0) for r in rows])
+            if self.settings.get("balanced"):
+                counts = np.bincount(y, minlength=len(TIERS)).astype(float)
+                w = w * (len(y) / (len(TIERS) * np.maximum(counts, 1)))[y]
             if len(_trained) > 8:
                 _trained.clear()
-            _trained[key] = fit_logreg(X, y, w)
+            _trained[key] = fit_logreg(X, y, w, c=self.settings.get("c", 4.0))
         return _trained[key]
 
-    def _bayes(self, text: str) -> tuple[str | None, float]:
+    def _bayes(self, text: str) -> dict[str, float]:
         classes = [t for t in TIERS if self.prior[t] > 0]
         if not classes:
-            return None, 0.0
+            return {}
         fs = features(text)
         v = len(self.vocab) + 1
         n = sum(self.prior[t] for t in classes)
@@ -345,8 +368,7 @@ class Learner:
             scores[t] = s
         top = max(scores.values())
         exp = {t: math.exp(s - top) for t, s in scores.items()}
-        best = max(exp, key=exp.get)
-        return best, exp[best] / sum(exp.values())
+        return {t: exp.get(t, 0.0) / sum(exp.values()) for t in TIERS}
 
     def add(self, text: str, tier: str, source: str):
         row = {"text": text[:2000], "tier": tier, "source": source}
@@ -362,15 +384,15 @@ class Learner:
             self.rows.remove(old)
         self._fit(row)
 
-    def cross_val(self) -> list[tuple[float, str, str]]:
+    def cross_val(self) -> list[tuple[dict[str, float], str]]:
         out = []
         if not self.encoder:
             for row in list(self.rows):
                 self._fit(row, -1)
-                tier, prob = self._bayes(row["text"])
+                probs = self._bayes(row["text"])
                 self._fit(row, 1)
                 self.rows.pop()
-                out.append((prob, tier, row["tier"]))
+                out.append((probs, row["tier"]))
             return out
         for k in range(FOLDS):
             train = [r for i, r in enumerate(self.rows) if i % FOLDS != k]
@@ -378,53 +400,98 @@ class Learner:
             if not test or len({r["tier"] for r in train}) < 2:
                 continue
             probs = self._classifier(train)(vectors([r["text"] for r in test], self.encoder))
-            out += [(float(p.max()), TIERS[int(p.argmax())], r["tier"]) for p, r in zip(probs, test)]
+            out += [(dict(zip(TIERS, map(float, p))), r["tier"]) for p, r in zip(probs, test)]
         return out
 
-    def held_out(self) -> list[tuple[float, bool]]:
-        return [(prob, guess == truth) for prob, guess, truth in self.cross_val()]
+    def gate(self, paid: set[str], max_miss: float, min_precision: float,
+             cv: list[tuple[dict[str, float], str]] | None = None) -> tuple[float, float]:
+        if not paid:
+            return 1.0, NEVER
+        if paid >= set(TIERS):
+            return -1.0, 0.0
+        cv = self.cross_val() if cv is None else cv
+        scored = [(sum(p.get(t, 0.0) for t in paid), truth in paid) for p, truth in cv if p]
+        cuts = sorted({s for s, _ in scored})
+        all_paid = max(sum(is_paid for _, is_paid in scored), 1)
+        low, high = -1.0, NEVER
+        for t in cuts:
+            below = [is_paid for s, is_paid in scored if s <= t]
+            if len(below) >= MIN_SURE and sum(below) / all_paid <= max_miss:
+                low = t
+        for t in reversed(cuts):
+            above = [is_paid for s, is_paid in scored if s >= t]
+            if len(above) >= MIN_SURE and sum(above) / len(above) >= min_precision:
+                high = t
+        return low, high
 
-    def threshold(self, target: float, preds: list[tuple[float, bool]] | None = None) -> float:
-        preds = self.held_out() if preds is None else preds
-        for t in [x / 100 for x in range(60, 100, 2)]:
-            sure = [ok for prob, ok in preds if prob >= t]
-            if len(sure) >= MIN_SURE and sum(sure) / len(sure) >= target:
-                return t
-        return NEVER
-
-    def cached_threshold(self, target: float) -> float:
+    def cached_gate(self, paid: set[str], max_miss: float, min_precision: float) -> tuple[float, float]:
         path = labels_path().with_name("ml_threshold.json")
-        key = {"rows": len(self.rows), "target": target, "backend": self.backend}
+        key = {"rows": len(self.rows), "backend": self.backend, "paid": sorted(paid), "max_miss": max_miss,
+               "min_precision": min_precision, "settings": self.settings}
         try:
             cached = json.loads(path.read_text(encoding="utf-8"))
             if {k: cached.get(k) for k in key} == key:
-                return cached["threshold"]
-        except (OSError, ValueError, KeyError):
+                return tuple(cached["gate"])
+        except (OSError, ValueError, KeyError, TypeError):
             pass
-        t = self.threshold(target)
+        gate = self.gate(paid, max_miss, min_precision)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({**key, "threshold": t}), encoding="utf-8")
+            path.write_text(json.dumps({**key, "gate": gate}), encoding="utf-8")
         except OSError:
             pass
-        return t
+        return gate
 
-    def report(self, target: float) -> dict:
+    def score(self, cfg: dict, cv: list[tuple[dict[str, float], str]] | None = None) -> tuple[float, float]:
+        paid, max_miss, min_precision = gate_limits(cfg)
+        cv = self.cross_val() if cv is None else cv
+        low, high = self.gate(paid, max_miss, min_precision, cv)
+        decided = [(decide(p, low, high, paid), truth) for p, truth in cv]
+        decided = [(tier, truth) for tier, truth in decided if tier]
+        all_paid = sum(truth in paid for _, truth in cv)
+        coverage = len(decided) / len(cv) if cv else 0.0
+        caught = sum(tier in paid and truth in paid for tier, truth in decided) / all_paid if all_paid else 0.0
+        return round(coverage, 4), round(caught, 4)
+
+    def tune(self, cfg: dict) -> dict:
+        if not self.encoder:
+            return {"settings": self.settings, "changed": False}
+        current = self.score(cfg)
+        tried = {json.dumps(s, sort_keys=True): Learner(self.rows, self.encoder, s).score(cfg) for s in SETTINGS_GRID}
+        best = max(tried, key=tried.get)
+        changed = tried[best] > current
+        if changed:
+            self.settings = json.loads(best)
+            try:
+                settings_path().parent.mkdir(parents=True, exist_ok=True)
+                settings_path().write_text(best, encoding="utf-8")
+            except OSError:
+                pass
+        return {"settings": self.settings, "changed": changed, "before": current,
+                "after": tried[best] if changed else current}
+
+    def report(self, cfg: dict) -> dict:
+        paid, max_miss, min_precision = gate_limits(cfg)
         cv = self.cross_val()
-        preds = [(prob, guess == truth) for prob, guess, truth in cv]
-        t = self.threshold(target, preds)
-        sure = [ok for prob, ok in preds if prob >= t]
-        n = len(preds)
-        under = sum(TIERS.index(guess) < TIERS.index(truth) for _, guess, truth in cv)
+        low, high = self.gate(paid, max_miss, min_precision, cv)
+        n = len(cv)
+        guesses = [(max(p, key=p.get) if p else None, truth) for p, truth in cv]
+        decided = [(decide(p, low, high, paid), truth) for p, truth in cv]
+        decided = [(tier, truth) for tier, truth in decided if tier]
+        truly_paid = [tier for tier, truth in decided if truth in paid]
+        all_paid = sum(truth in paid for _, truth in cv)
         result = {
             "backend": self.backend,
+            "settings": self.settings,
             "labels": len(self.rows),
             "by_source": dict(Counter(r.get("source", "?") for r in self.rows)),
-            "accuracy_all": round(sum(ok for _, ok in preds) / n, 3) if n else None,
-            "under_route": round(under / n, 3) if n else None,
-            "threshold": t,
-            "ml_decides": round(len(sure) / n, 3) if n else None,
-            "accuracy_when_ml_decides": round(sum(sure) / len(sure), 3) if sure else None,
+            "accuracy_all": round(sum(g == t for g, t in guesses) / n, 3) if n else None,
+            "gate": [round(low, 3), round(high, 3)],
+            "ml_decides": round(len(decided) / n, 3) if n else None,
+            "route_accuracy_when_ml_decides": round(
+                sum((tier in paid) == (truth in paid) for tier, truth in decided) / len(decided), 3) if decided else None,
+            "paid_caught_by_ml": round(sum(t in paid for t in truly_paid) / all_paid, 3) if all_paid else None,
+            "paid_sent_free_by_ml": round(sum(t not in paid for t in truly_paid) / all_paid, 3) if all_paid else None,
             "audit": audit_summary(),
         }
         try:
@@ -437,6 +504,20 @@ class Learner:
 
 MIN_SURE = 5
 NEVER = 1.01
+
+
+def gate_limits(cfg: dict) -> tuple[set[str], float, float]:
+    c = cfg["classifier"]
+    paid = set(TIERS) - set(cfg.get("routing", {}).get("free_tiers", []))
+    return paid, c.get("ml_max_miss", 0.05), c.get("ml_min_precision", 0.7)
+
+
+def decide(probs: dict[str, float], low: float, high: float, paid: set[str]) -> str | None:
+    if not probs:
+        return None
+    score = sum(probs.get(t, 0.0) for t in paid)
+    group = paid if score >= high else set(TIERS) - paid if score <= low else None
+    return max(group, key=lambda t: probs.get(t, 0.0)) if group else None
 
 
 def _jsonl(path: Path) -> list[dict]:
@@ -552,7 +633,7 @@ def teach_if_due(cfg: dict, info=lambda text: None) -> int | None:
     try:
         added = teach(cfg, info)
         if added:
-            Learner.load(get_encoder() if c.get("embed", True) else None).report(c.get("ml_target_accuracy", 0.9))
+            retrain(cfg)
         return added
     finally:
         try:
@@ -561,13 +642,23 @@ def teach_if_due(cfg: dict, info=lambda text: None) -> int | None:
             pass
 
 
+def retrain(cfg: dict, encoder=None) -> dict:
+    if encoder is None and cfg["classifier"].get("embed", True):
+        encoder = get_encoder()
+    model = Learner.load(encoder)
+    tuning = model.tune(cfg)
+    return {**model.report(cfg), "tuning": tuning}
+
+
 def judge(prompt: str, cfg: dict, info, use_llm: bool = True, wait: bool = True) -> tuple[str | None, str | None, bool]:
     c = cfg["classifier"]
     model = Learner.load(get_encoder(wait) if c.get("embed", True) else None)
-    tier, prob = model.predict(prompt)
-    if tier and len(model.rows) >= c.get("ml_min_labels", 30) \
-            and prob >= model.cached_threshold(c.get("ml_target_accuracy", 0.9)):
-        return tier, f"ml: {tier} {prob:.2f}", False
+    if len(model.rows) >= c.get("ml_min_labels", 30):
+        probs = model.probs(prompt)
+        paid, max_miss, min_precision = gate_limits(cfg)
+        tier = decide(probs, *model.cached_gate(paid, max_miss, min_precision), paid)
+        if tier:
+            return tier, f"ml: {tier} {probs[tier]:.2f}", False
     if not (use_llm and c.get("llm_fallback")):
         return None, None, False
     info("menilai prompt...")

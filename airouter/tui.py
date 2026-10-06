@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import sys
 import threading
@@ -12,7 +13,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.theme import Theme
-from textual.widgets import Markdown, Static, TextArea, Tree
+from textual.widgets import Button, Markdown, Static, TextArea, Tree
 
 from . import attach, codex, config, learn
 from .chat import HELP, Chat
@@ -113,6 +114,9 @@ Composer:focus { border: none; }
 Composer .text-area--selection { background: #264F78; }
 Composer .text-area--cursor { color: #1F1F1F; background: #CCCCCC; text-style: none; }
 ModelPicker { align: center middle; background: #000000 50%; }
+CommandApproval { align: center middle; background: #000000 50%; }
+#approval { width: 80%; height: 80%; border: round #454545; background: #202020; padding: 1 2; }
+#approval-details { height: 1fr; }
 #picker { width: 64; height: 90%; border: round #454545; background: #202020; padding: 0 2; }
 #picker-title { color: #CCCCCC; text-style: bold; margin: 1 0; }
 #picker-hint { color: #6E7681; margin: 1 0; }
@@ -359,6 +363,29 @@ class ModelPicker(ModalScreen):
             self.dismiss(event.node.data)
 
 
+class CommandApproval(ModalScreen):
+    BINDINGS = [Binding("escape", "reject", "Tolak")]
+
+    def __init__(self, params):
+        super().__init__()
+        self.params = params
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="approval"):
+            yield Static("Codex meminta izin menjalankan perintah di luar sandbox")
+            with VerticalScroll(id="approval-details"):
+                yield Static(json.dumps(self.params, ensure_ascii=False, indent=2), markup=False)
+            with Horizontal():
+                yield Button("Tolak", id="reject")
+                yield Button("Izinkan sekali", id="accept")
+
+    def action_reject(self):
+        self.dismiss(False)
+
+    def on_button_pressed(self, event: Button.Pressed):
+        self.dismiss(event.button.id == "accept")
+
+
 class TuiUI:
     def __init__(self, app: "ChatApp"):
         self.app = app
@@ -370,6 +397,22 @@ class TuiUI:
 
     def info(self, text: str):
         self._call(self.app.add_info, text)
+
+    def approve(self, params, cancelled):
+        ready = threading.Event()
+        decision = []
+        screen = CommandApproval(params)
+
+        def answered(value):
+            decision.append(bool(value))
+            ready.set()
+
+        self._call(self.app.push_screen, screen, answered)
+        while not ready.wait(0.1):
+            if cancelled():
+                self._call(screen.dismiss, False)
+                return False
+        return decision[0]
 
     def start(self, tier: str, provider: str, route: dict, reasons: list[str]):
         self._call(self.app.start_reply, route["model"], f"{provider} · {tier} · {route['effort']}")

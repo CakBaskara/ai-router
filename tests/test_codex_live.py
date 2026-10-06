@@ -307,3 +307,54 @@ def test_foreign_thread_events_and_server_requests_do_not_stall_reply(server):
     assert result["code"] == 0 and turn.text() == "own reply"
     response = next(r for r in server.written if r.get("id") == "server-question")
     assert response["error"]["code"] == -32601
+
+
+@pytest.mark.parametrize("decision", [True, False])
+def test_command_approval_returns_user_decision(server, decision):
+    seen = []
+    def approve(params, cancelled):
+        seen.append(params["command"])
+        assert not cancelled()
+        return decision
+    proc = CodexProc("model-a", "low", None, approve=approve)
+    worker, turn, result, _ = ask_in_thread(proc)
+    wait_until(lambda: proc.turn_id == "turn-1")
+    server.emit({"id": "approval", "method": "item/commandExecution/requestApproval", "params": {
+        "threadId": "thread-1", "turnId": "turn-1", "command": "code --new-window project"}})
+    wait_until(lambda: any(r.get("id") == "approval" for r in server.written))
+    response = next(r for r in server.written if r.get("id") == "approval")
+    assert response["result"]["decision"] == ("accept" if decision else "decline")
+    assert seen == ["code --new-window project"]
+    server.finish()
+    worker.join(3)
+    assert result["code"] == 0
+
+
+def test_foreign_command_approval_is_declined(server):
+    proc = CodexProc("model-a", "low", None, approve=lambda *args: pytest.fail("foreign approval"))
+    worker, turn, result, _ = ask_in_thread(proc)
+    wait_until(lambda: proc.turn_id == "turn-1")
+    server.emit({"id": "approval", "method": "item/commandExecution/requestApproval", "params": {
+        "threadId": "other-thread", "turnId": "turn-1", "command": "code"}})
+    wait_until(lambda: any(r.get("id") == "approval" for r in server.written))
+    response = next(r for r in server.written if r.get("id") == "approval")
+    assert response["result"]["decision"] == "decline"
+    server.finish()
+    worker.join(3)
+    assert result["code"] == 0
+
+
+def test_cancelled_command_approval_is_declined(server):
+    def approve(params, cancelled):
+        proc.cancel()
+        assert cancelled()
+        return True
+    proc = CodexProc("model-a", "low", None, approve=approve)
+    worker, turn, result, _ = ask_in_thread(proc)
+    wait_until(lambda: proc.turn_id == "turn-1")
+    server.emit({"id": "approval", "method": "item/commandExecution/requestApproval", "params": {
+        "threadId": "thread-1", "turnId": "turn-1", "command": "code"}})
+    worker.join(3)
+    response = next(r for r in server.written if r.get("id") == "approval")
+    assert response["result"]["decision"] == "decline"
+    assert result["code"] == 130

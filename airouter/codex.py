@@ -8,8 +8,9 @@ from . import attach, config, dispatch
 
 
 class CodexProc:
-    def __init__(self, model, effort, session):
+    def __init__(self, model, effort, session, approve=None):
         self.key = (model, effort)
+        self.approve = approve
         self.session = session
         self.proc = subprocess.Popen(dispatch.codex_server_cmd(), stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -88,8 +89,11 @@ class CodexProc:
                         else:
                             self.events.put(message)
                 elif "id" in message:
-                    self._write({"id": message["id"], "error": {
-                        "code": -32601, "message": "ai-router does not support this client request"}})
+                    if message.get("method") == "item/commandExecution/requestApproval":
+                        self.events.put(message)
+                    else:
+                        self._write({"id": message["id"], "error": {
+                            "code": -32601, "message": "ai-router does not support this client request"}})
                 else:
                     if message.get("method") == "account/rateLimits/updated":
                         limits = (message.get("params") or {}).get("rateLimits") or {}
@@ -143,6 +147,15 @@ class CodexProc:
                 if message is None:
                     raise OSError(self.errors[-1] if self.errors else "Codex app-server disconnected")
                 if "id" in message:
+                    if message.get("method") == "item/commandExecution/requestApproval":
+                        params = message.get("params", {})
+                        allowed = (params.get("threadId") == self.session
+                                   and params.get("turnId") == self.turn_id
+                                   and not self.cancelled and self.approve
+                                   and self.approve(params, lambda: self.cancelled or not self.alive()))
+                        self._write({"id": message["id"], "result": {
+                            "decision": "accept" if allowed and not self.cancelled else "decline"}})
+                        continue
                     with self.lock:
                         inputs = self.pending.pop(message["id"], None)
                         if inputs and "error" in message:

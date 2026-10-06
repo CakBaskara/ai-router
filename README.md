@@ -80,6 +80,8 @@ answers and kept only if it scores better; otherwise the old one comes back. The
 
 - In the chat, edits and commands run without asking. Each CLI's own safety settings still
   apply.
+- Codex command approval requests appear in the chat with one-time accept and reject buttons.
+  Restart `ai` after updating to enable this dialog; console-only clients decline these requests.
 - Messages sent while Claude or Codex is replying join the active work. A message arriving
   after the turn has ended starts a follow-up reply. Model-switch commands take effect between turns.
 - Claude and Codex chat sessions include the current project and the ai-router installation folder as writable

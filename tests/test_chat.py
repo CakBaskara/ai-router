@@ -68,6 +68,15 @@ def test_claude_turn_error_result():
     assert turn.error == "limit"
 
 
+def test_failed_chat_logs_the_error():
+    run, _ = fake_runner([(1, [{"type": "result", "subtype": "error_during_execution",
+                                "is_error": True, "result": "session hilang"}])])
+    c = Chat({**CFG, "providers": ["claude"]}, use_llm=False, ui=RecordUI())
+    assert c.send("coba lagi", runner=run) == 1
+    row = json.loads(config.log_path().read_text(encoding="utf-8").strip())
+    assert row["mode"] == "chat" and row["exit"] == 1 and row["error"] == "session hilang"
+
+
 def test_codex_turn():
     turn = CodexTurn()
     for ev in codex_reply("Tokyo"):

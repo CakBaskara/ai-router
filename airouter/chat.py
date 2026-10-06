@@ -597,7 +597,7 @@ class Chat:
             if not p or not p.alive() or p.key != key or p.session != session:
                 if p:
                     p.close()
-                self._codex = p = CodexProc(*key, session)
+                self._codex = p = CodexProc(*key, session, approve=getattr(self.ui, "approve", None))
             with p.lock:
                 p.cancelled = False
             self._live = p
@@ -649,7 +649,8 @@ class Chat:
             if code == 0 and not turn.error and not turn.text():
                 turn.error = "tidak ada jawaban"
             ok = code == 0 and not turn.error
-            self._log(msg, tier, reasons, llm, provider, route, code, seconds, turn.session)
+            error = turn.error or (f"exit {code}" if code not in (0, 130) else "")
+            self._log(msg, tier, reasons, llm, provider, route, code, seconds, turn.session, error)
             if ok or code == 130:
                 if turn.session:
                     self.sessions[provider] = turn.session
@@ -810,8 +811,8 @@ class Chat:
             self.injected.append(content)
             return True
 
-    def _log(self, msg, tier, reasons, llm, provider, route, code, seconds, session):
-        log({
+    def _log(self, msg, tier, reasons, llm, provider, route, code, seconds, session, error=""):
+        row = {
             "ts": datetime.now().isoformat(timespec="seconds"),
             "cwd": os.getcwd(),
             "mode": "chat",
@@ -826,7 +827,8 @@ class Chat:
             "exit": code,
             "seconds": seconds,
             "prompt": msg[:500],
-        })
+        }
+        log({**row, "error": error} if error else row)
 
     def label(self) -> str:
         return self.pinned_model or self.model or "auto"

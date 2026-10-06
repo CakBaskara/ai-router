@@ -16,19 +16,6 @@ def png(path, size=(4, 4)):
     return path
 
 
-def test_paths_in_accepts_quoted_and_plain_paths(tmp_path):
-    a = png(tmp_path / "a b.png")
-    b = (tmp_path / "log.txt")
-    b.write_text("x")
-    assert attach.paths_in(f'"{a}" {b}') == [a, b]
-    assert attach.paths_in(f"'{a}'") == [a]
-
-
-def test_paths_in_rejects_normal_text(tmp_path):
-    assert attach.paths_in("tolong cek log hari ini") is None
-    assert attach.paths_in(str(tmp_path / "tidak-ada.png")) is None
-
-
 def test_store_copies_into_attachment_folder(tmp_path):
     src = png(tmp_path / "foto saya.png")
     dest = attach.store(src)
@@ -118,16 +105,25 @@ def make_app():
     return app
 
 
-def test_pasting_a_path_attaches_instead_of_typing(tmp_path):
+def test_pasting_a_path_types_it_as_text(tmp_path):
     from textual import events
     f = png(tmp_path / "foto.png")
 
     async def go():
         app = make_app()
         async with app.run_test(size=(100, 30)) as pilot:
-            app.query_one(Composer).post_message(events.Paste(f'"{f}"'))
+            app.post_message(events.Paste(f'"{f}"'))
             await pilot.pause()
-            assert app.query_one(Composer).text == "" and len(app.attachments) == 1
+            assert app.query_one(Composer).text == f'"{f}"' and app.attachments == []
+    asyncio.run(go())
+
+
+def test_backspace_on_empty_input_drops_attachment(tmp_path):
+    async def go():
+        app = make_app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            app.attach_files([png(tmp_path / "foto.png")])
+            await pilot.pause()
             assert "foto.png" in str(app.query_one("#files").render())
             await pilot.press("backspace")
             await pilot.pause()

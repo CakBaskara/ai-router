@@ -2,7 +2,7 @@ import json
 import threading
 import time
 
-from airouter import config, dispatch
+from airouter import cli, config, dispatch, learn
 from airouter.chat import CHAT_NOTE, Chat, ClaudeTurn, CodexTurn, parse_review, recap
 
 CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing", "loop")}, "providers": ["claude", "codex"]}
@@ -120,7 +120,7 @@ def test_same_provider_resumes_without_recap():
     c.send("apa itu ISO", runner=run)
     cmd, prompt = calls[1]
     assert cmd[cmd.index("--resume") + 1] == "s-claude"
-    assert prompt == "apa itu ISO"
+    assert prompt == learn.style_note()[1] + "apa itu ISO"
 
 
 def test_fallback_to_codex_sends_recap_and_sticks():
@@ -134,7 +134,7 @@ def test_fallback_to_codex_sends_recap_and_sticks():
     assert "User: apa itu LC3" in prompt and "Assistant: jawab satu" in prompt and prompt.endswith("apa itu ISO")
     c.send("apa itu USB", runner=run)
     cmd, prompt = calls[3]
-    assert "resume" in cmd and prompt == "apa itu USB"
+    assert "resume" in cmd and prompt == learn.style_note()[1] + "apa itu USB"
 
 
 def test_switch_back_recaps_only_unseen_turns():
@@ -408,19 +408,89 @@ def test_quota_report_lists_both_providers():
 LOOP_CFG = {**CFG, "loop": {"tiers": ["heavy"], "min_quota": 20}}
 
 
-def test_heavy_answer_is_revised_until_reviewer_passes():
-    run, calls = fake_runner([(0, claude_reply("versi 1")), (0, codex_reply("Cek angka.\nREVISI\n- angka salah")),
-                              (0, claude_reply("versi 2")), (0, codex_reply("Sudah benar.\n**LOLOS**"))])
-    c = Chat(LOOP_CFG, provider="claude", tier="heavy", use_llm=False)
+class RecordUI:
+    def __init__(self):
+        self.shown = []
+        self.infos = []
+
+    def info(self, text):
+        self.infos.append(text)
+
+    def start(self, *args):
+        pass
+
+    def show(self, kind, text):
+        self.shown.append((kind, text))
+
+    def done(self, *args):
+        pass
+
+    def failed(self, *args):
+        pass
+
+
+def showing_runner(replies):
+    calls = []
+
+    def run(cmd, prompt, turn, show, started):
+        calls.append((cmd, prompt))
+        code, events = replies.pop(0)
+        for ev in events:
+            shown = turn.feed(ev)
+            if shown:
+                show(*shown)
+        return code
+
+    return run, calls
+
+
+def test_heavy_answer_is_self_reviewed_and_only_final_is_shown():
+    run, calls = showing_runner([(0, claude_reply("versi 1")), (0, claude_reply("Cek angka.\nREVISI\n- angka salah")),
+                                 (0, claude_reply("versi 2")), (0, claude_reply("Sudah benar.\n**LOLOS**"))])
+    ui = RecordUI()
+    c = Chat(LOOP_CFG, provider="claude", tier="heavy", use_llm=False, ui=ui)
     assert c.send("hitung ulang anggaran", runner=run) == 0
     assert c.transcript[-1] == ("Assistant", "versi 2")
-    assert [cmd[cmd.index("exec") + 1] if "exec" in cmd else "claude" for cmd, _ in calls] == \
-        ["claude", "-m", "claude", "-m"]
-    assert "read-only" in calls[1][0] and "versi 1" in calls[1][1] and "hitung ulang anggaran" in calls[1][1]
+    assert [t for k, t in ui.shown if k == "text"] == ["versi 2"]
+    reviews = [i for i, (cmd, _) in enumerate(calls) if "--no-session-persistence" in cmd]
+    assert reviews == [1, 3] and all("opus" in calls[i][0] for i in reviews)
+    assert "versi 1" in calls[1][1] and "hitung ulang anggaran" in calls[1][1]
     assert "- angka salah" in calls[2][1]
     rows = [json.loads(line) for line in config.log_path().read_text(encoding="utf-8").splitlines()]
     assert [r["mode"] for r in rows] == ["chat", "review", "revise", "review"]
     assert all("prompt" not in r for r in rows[1:])
+
+
+def test_failed_revision_is_retried_once():
+    run, calls = fake_runner([(0, claude_reply("versi 1")), (0, claude_reply("REVISI\n- kurang")),
+                              (1, []), (0, claude_reply("versi 2")), (0, claude_reply("LOLOS"))])
+    c = Chat(LOOP_CFG, provider="claude", tier="heavy", use_llm=False, ui=RecordUI())
+    assert c.send("rancang arsitektur", runner=run) == 0
+    assert c.transcript[-1] == ("Assistant", "versi 2") and len(calls) == 5
+    rows = [json.loads(line) for line in config.log_path().read_text(encoding="utf-8").splitlines()]
+    assert [r["mode"] for r in rows] == ["chat", "review", "revise", "revise", "review"]
+    assert rows[2]["error"] and "error" not in rows[3]
+
+
+def test_loop_stops_after_max_rounds_with_last_version():
+    replies = [(0, claude_reply("versi 1"))]
+    for n in (2, 3):
+        replies += [(0, claude_reply("REVISI\n- lagi")), (0, claude_reply(f"versi {n}"))]
+    run, calls = fake_runner(replies)
+    ui = RecordUI()
+    c = Chat({**LOOP_CFG, "loop": {"tiers": ["heavy"], "min_quota": 20, "max_rounds": 2}},
+             provider="claude", tier="heavy", use_llm=False, ui=ui)
+    assert c.send("rancang arsitektur", runner=run) == 0
+    assert len(calls) == 5 and c.transcript[-1] == ("Assistant", "versi 3")
+    assert any("belum lolos setelah 2 review" in i for i in ui.infos)
+
+
+def test_provider_without_reviewer_still_shows_answer():
+    run, calls = showing_runner([(0, [{"type": "message", "role": "assistant", "content": "jawaban gemini"}])])
+    ui = RecordUI()
+    c = Chat({**LOOP_CFG, "providers": ["gemini"]}, provider="gemini", tier="heavy", use_llm=False, ui=ui)
+    assert c.send("rancang arsitektur", runner=run) == 0
+    assert len(calls) == 1 and [t for k, t in ui.shown if k == "text"] == ["jawaban gemini"]
 
 
 def test_loop_stops_when_quota_is_low():
@@ -449,3 +519,61 @@ def test_parse_review_takes_last_verdict():
     assert parse_review("Awalnya REVISI tapi\nsetelah cek:\nLOLOS") == ("LOLOS", "")
     assert parse_review("1. tambah test\n\nREVISI") == ("REVISI", "1. tambah test")
     assert parse_review("tidak ada vonis")[0] is None
+
+
+def test_every_turn_carries_the_style_note():
+    c = chat()
+    run, calls = fake_runner([(0, claude_reply("a")), (0, claude_reply("b"))])
+    c.send("apa itu LC3", runner=run)
+    c.send("apa itu ISO", runner=run)
+    assert all(learn.style_note()[1] in prompt for _, prompt in calls)
+    assert "not curtly" not in CHAT_NOTE
+
+
+def test_ramble_flags_padding_but_not_code():
+    padded = ("Pertanyaan bagus! Anda bertanya soal ISO.\n\n## Ringkasan\nISO adalah standar.\n\n"
+              "Semoga membantu, kalau ada pertanyaan lain silakan.")
+    assert learn.ramble("apa itu ISO", padded)["flags"] == ["opener", "closer", "echo", "headings"]
+    code = "Pakai ini:\n```python\n" + "x = 1\n" * 300 + "```"
+    assert learn.ramble("contoh kode", code)["flags"] == []
+    assert learn.ramble("apa itu ISO", "kata " * 250)["flags"] == ["long"]
+
+
+def test_ramble_leaves_a_direct_answer_alone():
+    assert learn.ramble("kenapa build zephyr gagal di windows",
+                        "Build Zephyr gagal di Windows karena path terlalu panjang.")["flags"] == []
+
+
+def test_reactions_read_short_follow_ups_only():
+    assert learn.reactions("singkat aja") == ["too_long"]
+    assert learn.reactions("maksudnya gimana?") == ["unclear"]
+    assert learn.reactions("bukan itu yang saya tanya") == ["off"]
+    assert learn.reactions("tolong ringkas " + "laporan ini " * 20) == []
+    assert learn.reactions("ok lanjut") == []
+
+
+def test_replies_and_reactions_are_logged():
+    c = chat()
+    run, _ = fake_runner([(0, claude_reply("Tentu! ISO itu standar.")), (0, claude_reply("ISO = standar."))])
+    c.send("apa itu ISO", runner=run)
+    c.send("kepanjangan, singkat aja", runner=run)
+    rows = [json.loads(line) for line in learn.replies_path().read_text(encoding="utf-8").splitlines()]
+    first, reaction, second = rows
+    assert first["reply"] == "Tentu! ISO itu standar." and first["flags"] == ["opener"] and not first["cancelled"]
+    assert reaction["ref"] == first["id"] and reaction["reaction"] == ["too_long"]
+    assert second["prompt"] == "kepanjangan, singkat aja" and second["style"] == first["style"]
+    report = learn.style_report()
+    assert report["replies"] == 2 and report["groups"][0]["reactions"] == {"too_long": 1}
+    assert "too_long 1" in cli.style_report(report)
+
+
+def test_stopped_reply_is_logged_as_cancelled():
+    c = chat()
+    run, _ = fake_runner([(130, claude_reply("sebagian"))])
+    c.send("apa itu LC3", runner=run)
+    row = json.loads(learn.replies_path().read_text(encoding="utf-8"))
+    assert row["cancelled"] and row["reply"] == "sebagian"
+
+
+def test_style_report_without_data():
+    assert cli.style_report(learn.style_report()) == "belum ada jawaban chat yang tercatat"

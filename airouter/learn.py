@@ -623,18 +623,36 @@ def teach_due(cfg: dict) -> bool:
 
 
 def teach_if_due(cfg: dict, info=lambda text: None) -> int | None:
-    c = cfg["classifier"]
-    if not teach_due(cfg):
+    routing, style = teach_due(cfg), style_due()
+    if not (routing or style):
         return None
     lock = teach_lock()
     lock.parent.mkdir(parents=True, exist_ok=True)
     if not _claim(lock):
         return None
     try:
-        added = teach(cfg, info)
-        if added:
-            retrain(cfg)
+        added = None
+        if routing:
+            added = teach(cfg, info)
+            if added:
+                retrain(cfg)
+        if style:
+            info(learn_style(cfg))
         return added
+    finally:
+        try:
+            lock.write_text("done", encoding="utf-8")
+        except OSError:
+            pass
+
+
+def learn_style_locked(cfg: dict) -> str:
+    lock = teach_lock()
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    if not _claim(lock):
+        return "gaya: guru sedang atau baru saja jalan di background, coba lagi nanti"
+    try:
+        return learn_style(cfg)
     finally:
         try:
             lock.write_text("done", encoding="utf-8")
@@ -674,3 +692,271 @@ def tier_of(cfg: dict, provider: str, model: str) -> str | None:
         if cfg["tiers"][tier][provider]["model"] == model:
             return tier
     return None
+
+
+OPENER = re.compile(r"^\W*(?:pertanyaan (?:yang )?(?:bagus|menarik)|tentu(?:nya|\s+saja|\s+bisa)?\b|baik(?:lah)?[,!.]"
+                    r"|siap[,!.]|oke[,!.]|great question|good question|certainly|sure[,!.]|of course|absolutely)", re.I)
+CLOSER = re.compile(r"semoga (?:membantu|bermanfaat|jelas)|jangan ragu|(?:kalau|jika|bila) (?:ada|masih ada) "
+                    r"(?:pertanyaan|yang)|ada lagi yang|let me know|hope (?:this|that) helps|feel free", re.I)
+ECHO = re.compile(r"\b(?:anda|kamu|you) (?:bertanya|menanyakan|ingin tahu|asked|are asking|want to know)\b"
+                  r"|\bpertanyaan (?:anda|kamu)\b", re.I)
+REACTIONS = {
+    "too_long": re.compile(r"\b(?:singkat(?:nya|in)?|ringkas(?:nya|in)?|intinya|to the point|kepanjangan|terlalu "
+                           r"panjang|bertele|ng?e?lantur|muter|basa.?basi|too long|tl;?dr)\b", re.I),
+    "unclear": re.compile(r"\b(?:maksudnya|maksud(?:mu| kamu| anda)|(?:gak|ga|nggak|tidak|kurang) (?:paham|ngerti|"
+                          r"jelas)|bingung|what do you mean)\b", re.I),
+    "off": re.compile(r"\b(?:bukan itu|bukan begitu|bukan gitu|salah paham|bukan yang (?:saya|aku)|not what i)\b", re.I),
+}
+SHORT_PROMPT = 20
+REACTION_WORDS = 25
+LONG_REPLY = 200
+FENCE = re.compile(r"```.*?(?:```|\Z)", re.S)
+
+
+def replies_path() -> Path:
+    return config.log_path().with_name("replies.jsonl")
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"\w+", text.lower())
+
+
+def ramble(prompt: str, reply: str) -> dict:
+    prose = FENCE.sub(" ", reply)
+    words, asked = _words(prose), _words(prompt)
+    flags = []
+    if OPENER.search(prose):
+        flags.append("opener")
+    if CLOSER.search(prose[-300:]):
+        flags.append("closer")
+    if ECHO.search(prose.strip()[:200]):
+        flags.append("echo")
+    if len(asked) <= SHORT_PROMPT and len(words) > LONG_REPLY:
+        flags.append("long")
+    if len(words) < LONG_REPLY and re.search(r"^#{1,6} ", prose, re.M):
+        flags.append("headings")
+    return {"words": len(words), "prompt_words": len(asked), "flags": flags, "score": len(flags)}
+
+
+def reactions(msg: str) -> list[str]:
+    if len(_words(msg)) > REACTION_WORDS:
+        return []
+    return [name for name, pattern in REACTIONS.items() if pattern.search(msg)]
+
+
+def _append(path: Path, row: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def log_reply(prompt: str, reply: str, provider: str, model: str, tier: str, style: str, cancelled: bool) -> str:
+    rid = os.urandom(4).hex()
+    _append(replies_path(), {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "id": rid, "provider": provider, "model": model,
+                             "tier": tier, "style": style, "cancelled": cancelled, **ramble(prompt, reply),
+                             "prompt": prompt[:2000], "reply": reply[:20000]})
+    return rid
+
+
+def log_reaction(ref: str, signals: list[str], msg: str):
+    _append(replies_path(), {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "ref": ref, "reaction": signals,
+                             "text": msg[:300]})
+
+
+def _reacted(rows: list[dict]) -> dict[str, list[str]]:
+    out = defaultdict(list)
+    for r in rows:
+        if r.get("ref"):
+            out[r["ref"]] += r.get("reaction", [])
+    return out
+
+
+def style_report(last: int = 200) -> dict:
+    rows = _jsonl(replies_path())
+    replies = [r for r in rows if "reply" in r][-last:]
+    reacted = _reacted(rows)
+    groups = defaultdict(list)
+    for r in replies:
+        groups[(r["provider"], r["style"])].append(r)
+    out = []
+    for (provider, style), group in sorted(groups.items()):
+        n = len(group)
+        words = sorted(r["words"] for r in group)
+        flags = Counter(f for r in group for f in r["flags"])
+        signals = Counter(s for r in group for s in reacted.get(r["id"], []))
+        out.append({"provider": provider, "style": style, "replies": n, "median_words": words[n // 2],
+                    "mean_score": round(sum(r["score"] for r in group) / n, 2),
+                    "flags": {f: round(c / n, 2) for f, c in flags.most_common()},
+                    "stopped": sum(r["cancelled"] for r in group), "reactions": dict(signals)})
+    active = style_id(current_style())
+    trial = _style_state().get("trial")
+    testing = None
+    if trial and trial["id"] == active:
+        testing = {"against": trial["baseline_id"], "replies": _count(rows, active), "need": STYLE_MIN}
+    return {"replies": len(replies), "groups": out, "active": active, "trial": testing}
+
+
+STYLE_HEAD = "[Reply style from `ai`, not from the user] "
+DEFAULT_STYLE = (
+    "Put the answer in your first sentence. Fit the length to the question: a simple question gets one to three "
+    "sentences. No opening praise or \"Tentu\", no restating the question, no closing summary or \"semoga "
+    "membantu\". Talk like a colleague, in plain everyday words and the user's language. Use a list or table only "
+    "to compare several things, and headings only in long answers. Leave out details nobody asked for; offer them "
+    "in one short line instead."
+)
+STYLE_MIN = 30
+STYLE_MAX_CHARS = 1000
+STYLE_EXAMPLES = 8
+REACTION_WEIGHT = 3.0
+STYLE_PROMPT = (
+    "You improve the reply-style note that a terminal chat app puts before every user message it sends to AI "
+    "assistants. The user wants answers that read like a colleague talking: the answer first, no padding, no "
+    "rambling, short but complete. The input is JSON with the current note, notes that were tried and did not "
+    "help, the current note's stats, and recent replies that went badly. Flags: opener, closer, echo (restates "
+    "the question), long (short question, long answer), headings (headings in a short answer). Reactions come "
+    "from the user's next message: too_long, unclear (too terse or vague), off (missed the point). cancelled "
+    "means the user stopped the answer. Write a new note that fixes the patterns you see without making answers "
+    "cryptic. Keep the rules that work, say each rule once, at most 120 words, plain English sentences addressed "
+    "to the assistant. Do not mention topics, people or these examples. Reply with the note text only."
+)
+
+
+def style_path() -> Path:
+    return config.log_path().with_name("style.md")
+
+
+def style_state_path() -> Path:
+    return config.log_path().with_name("style_state.json")
+
+
+def style_id(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+
+
+def current_style() -> str:
+    try:
+        text = style_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        text = ""
+    return text or DEFAULT_STYLE
+
+
+def style_note() -> tuple[str, str]:
+    text = current_style()
+    return style_id(text), STYLE_HEAD + text + "\n\n"
+
+
+def _style_state() -> dict:
+    try:
+        return json.loads(style_state_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_style_state(state: dict):
+    style_state_path().parent.mkdir(parents=True, exist_ok=True)
+    style_state_path().write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _count(rows: list[dict], sid: str) -> int:
+    return sum(1 for r in rows if "reply" in r and r.get("style") == sid)
+
+
+def style_stats(rows: list[dict], sid: str, last: int = STYLE_MIN) -> dict | None:
+    group = [r for r in rows if "reply" in r and r.get("style") == sid][-last:]
+    if not group:
+        return None
+    reacted = _reacted(rows)
+    n = len(group)
+    score = sum(r["score"] for r in group) / n
+    bad = sum(1 for r in group if reacted.get(r["id"])) / n
+    stopped = sum(1 for r in group if r["cancelled"]) / n
+    return {"n": n, "score": round(score, 3), "reacted": round(bad, 3), "stopped": round(stopped, 3),
+            "badness": round(score + REACTION_WEIGHT * bad + stopped, 3)}
+
+
+def _learn_after(state: dict, sid: str) -> int:
+    return max(STYLE_MIN, state.get("waits", {}).get(sid, 0) + STYLE_MIN)
+
+
+def style_due() -> bool:
+    rows = _jsonl(replies_path())
+    sid = style_id(current_style())
+    state = _style_state()
+    trial = state.get("trial")
+    if trial and trial["id"] == sid:
+        return _count(rows, sid) >= STYLE_MIN
+    return _count(rows, sid) >= _learn_after(state, sid)
+
+
+def _bad_examples(rows: list[dict], sid: str) -> list[dict]:
+    reacted = _reacted(rows)
+    group = [r for r in rows if "reply" in r and r.get("style") == sid][-100:]
+    bad = [r for r in group if r["score"] or r["cancelled"] or reacted.get(r["id"])]
+    bad.sort(key=lambda r: (len(reacted.get(r["id"], [])), r["cancelled"], r["score"]), reverse=True)
+    return [{"prompt": r["prompt"][:400], "reply": r["reply"][:1500], "flags": r["flags"],
+             "reactions": reacted.get(r["id"], []), "cancelled": r["cancelled"]} for r in bad[:STYLE_EXAMPLES]]
+
+
+def _clean_note(text: str | None) -> str | None:
+    if not text:
+        return None
+    text = text.strip().strip("`").strip()
+    if text.startswith(STYLE_HEAD.strip()):
+        text = text[len(STYLE_HEAD.strip()):].strip()
+    return text if 0 < len(text) <= STYLE_MAX_CHARS else None
+
+
+def _judge_trial(state: dict, rows: list[dict], sid: str, text: str) -> str:
+    trial = state["trial"]
+    new, old = style_stats(rows, sid), style_stats(rows, trial["baseline_id"])
+    if not new or new["n"] < STYLE_MIN:
+        return f"gaya {sid} masih diuji: {new['n'] if new else 0}/{STYLE_MIN} jawaban"
+    keep = old is None or new["badness"] < old["badness"]
+    state.setdefault("history", []).append({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "id": sid, "text": text,
+                                            "baseline_id": trial["baseline_id"], "new": new, "old": old,
+                                            "kept": keep})
+    state["trial"] = None
+    before = old["badness"] if old else "-"
+    if keep:
+        state["waits"][sid] = _count(rows, sid)
+        _save_style_state(state)
+        return f"gaya {sid} dipakai: skor buruk {new['badness']} vs {before}"
+    style_path().write_text(trial["baseline_text"] + "\n", encoding="utf-8")
+    state["waits"][trial["baseline_id"]] = _count(rows, trial["baseline_id"])
+    _save_style_state(state)
+    return f"gaya {sid} dibuang ({new['badness']} vs {before}), kembali ke {trial['baseline_id']}"
+
+
+def learn_style(cfg: dict) -> str:
+    rows = _jsonl(replies_path())
+    text = current_style()
+    sid = style_id(text)
+    state = _style_state()
+    state.setdefault("waits", {})
+    trial = state.get("trial")
+    if trial and trial["id"] != sid:
+        state["trial"] = None
+    elif trial:
+        return _judge_trial(state, rows, sid, text)
+    n, after = _count(rows, sid), _learn_after(state, sid)
+    if n < after:
+        return f"gaya {sid}: {n} jawaban, belajar setelah {after}"
+    stats = style_stats(rows, sid)
+    state["waits"][sid] = n
+    if not stats["badness"]:
+        _save_style_state(state)
+        return f"gaya {sid} tidak punya masalah yang terukur"
+    rejected = [h["text"] for h in state.get("history", []) if not h["kept"]][-3:]
+    payload = {"current": text, "tried_without_success": rejected, "stats": stats,
+               "replies": _bad_examples(rows, sid)}
+    teacher = cfg["classifier"].get("teacher", "sonnet")
+    note = _clean_note(dispatch.llm_text(STYLE_PROMPT, json.dumps(payload, ensure_ascii=False), teacher))
+    if not note or style_id(note) == sid:
+        _save_style_state(state)
+        return f"guru {teacher} tidak memberi panduan gaya baru"
+    style_path().write_text(note + "\n", encoding="utf-8")
+    state["trial"] = {"id": style_id(note), "baseline_id": sid, "baseline_text": text,
+                      "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    _save_style_state(state)
+    return f"gaya baru {style_id(note)} diuji pada {STYLE_MIN} jawaban berikutnya"

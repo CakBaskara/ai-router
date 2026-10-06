@@ -230,14 +230,10 @@ class Composer(TextArea):
             self.action_paste()
 
     async def _on_paste(self, event):
-        files = attach.paths_in(event.text)
-        if files or not event.text.strip():
+        if not event.text.strip():
             event.prevent_default()
             event.stop()
-            if files:
-                self.app.attach_files(files)
-            else:
-                self.app.attach_from_clipboard()
+            self.app.attach_from_clipboard()
 
     async def _on_key(self, event):
         if event.key == "backspace" and not self.text and self.app.attachments:

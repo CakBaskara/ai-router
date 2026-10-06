@@ -3,7 +3,11 @@ from datetime import datetime
 from airouter import config, dispatch
 from airouter.chat import Chat, CopilotTurn, GeminiTurn, lineup
 
-CFG = {k: v for k, v in config.load().items() if k not in ("chat", "loop")}
+CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "loop")},
+       "providers": ["gemini", "copilot", "claude", "codex"],
+       "routing": {"free": ["gemini", "copilot"], "free_tiers": ["light", "medium"]}}
+CFG["models"] = {"gemini": ["gemini-3.8-flash"], "copilot": ["auto", "mai-code-1.1-flash", "gpt-6-luna"],
+                 **CFG["models"]}
 
 
 def test_gemini_turn_parses_stream():

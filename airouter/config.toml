@@ -1,8 +1,8 @@
-providers = ["gemini", "copilot", "claude", "codex"]
+providers = ["claude", "codex"]
 
 [routing]
 # Free providers go first for these tiers; heavy goes to the paid ones, which take turns by today's use.
-free = ["gemini", "copilot"]
+free = []
 free_tiers = ["light", "medium"]
 
 [classifier]
@@ -24,9 +24,11 @@ teacher = "sonnet"
 teach_every = 25
 
 [loop]
-# Answers in these tiers go to a reviewer on the other paid provider and are revised until the reviewer passes them.
+# Answers in these tiers are held back, reviewed by a fresh run of the same model, and revised until the review
+# passes them; only the final version is shown.
 tiers = ["heavy"]
-# The loop stops early when the 5-hour quota left for the answerer or the reviewer falls below this percent.
+max_rounds = 3
+# The loop stops early when the 5-hour quota left for the answering provider falls below this percent.
 min_quota = 20
 
 [chat]
@@ -37,8 +39,6 @@ dirs = ["D:/DOCUMENT/02_Main"]
 # Shown by /models and Ctrl+O, listed first. Codex adds `codex debug models` and Gemini adds the models
 # its API key can call. Copilot and Claude Code have no way to list models, so their lists are kept here.
 [models]
-gemini = ["gemini-3.8-flash"]
-copilot = ["auto", "mai-code-1.1-flash", "gpt-6-luna"]
 claude = [
     "haiku", "sonnet", "opus",
     "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5-20251001", "claude-opus-5",

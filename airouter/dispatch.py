@@ -230,6 +230,22 @@ def llm_classify(prompt: str, model: str) -> str | None:
     return None
 
 
+def llm_text(system: str, text: str, model: str, timeout: int = 300) -> str | None:
+    cmd = claude_cmd() + [
+        "-p", "--model", model, "--effort", "medium", "--tools", "",
+        "--no-session-persistence", "--strict-mcp-config",
+        "--output-format", "json", "--system-prompt", system,
+    ]
+    try:
+        out = subprocess.run(cmd, input=text.encode("utf-8"), capture_output=True, timeout=timeout)
+        data = json.loads(out.stdout.decode("utf-8", "replace"))
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return None
+    if data.get("is_error"):
+        return None
+    return str(data.get("result", "")).strip() or None
+
+
 GEMINI_SKIP = ("tts", "image", "robotics", "computer-use", "transcribe", "customtools", "embedding", "-pro")
 
 

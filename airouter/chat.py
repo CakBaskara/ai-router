@@ -34,8 +34,7 @@ CHAT_NOTE = (
     "Other assistants may have answered earlier turns; treat their answers as part of this conversation. You cannot switch "
     "models yourself. If the user wants another model, tell them to type /models for the list, /model <number or "
     "name> to pick one, or /model auto to go back to automatic routing; a short message such as \"pakai opus\" or "
-    "\"ganti ke codex\" does the same. /new starts a new conversation. "
-    "Answer naturally, like a helpful colleague, not curtly.\n\n"
+    "\"ganti ke codex\" does the same. /new starts a new conversation.\n\n"
 )
 REVIEW_PROMPT = (
     "You are an independent reviewer of another AI assistant's answer, given below with the request it answers. "
@@ -45,13 +44,13 @@ REVIEW_PROMPT = (
     "the concrete problems that must be fixed, most important first, in the language of the request.\n\n"
 )
 REVISE_PROMPT = (
-    "An independent reviewer ({reviewer}) asked for a revision of your last answer:\n\n{critique}\n\n"
+    "A fresh review of your last answer, run without this conversation, asked for a revision:\n\n{critique}\n\n"
     "Check each point, and look at code or files only when the point is about them. Fix what is right, files "
     "included; reject what is wrong with a short reason. Then write your full final answer again without talking "
     "about the review, because the user reads only this one."
 )
 VERDICT = re.compile(r"^\W*(LOLOS|REVISI)\b\W*$", re.M | re.I)
-STATE = ("tier", "provider", "model", "sessions", "synced", "transcript",
+STATE = ("tier", "provider", "model", "sessions", "synced", "transcript", "last_reply",
          "pinned_provider", "pinned_tier", "pinned_model")
 RECAP_ENTRIES = 12
 RECAP_CHARS = 2000
@@ -514,6 +513,7 @@ class Chat:
         self.sessions = {}
         self.synced = {}
         self.transcript = []
+        self.last_reply = None
 
     def route(self, msg: str) -> tuple[str, list[str], bool]:
         if self.pinned_tier:
@@ -584,12 +584,13 @@ class Chat:
             return
         self._claude_proc(self.claude_route(tier))
 
-    def _run(self, provider: str, route: dict, prompt: str, turn, runner, files=()) -> int:
+    def _run(self, provider: str, route: dict, prompt: str, turn, runner, files=(), show=None) -> int:
         prompt = with_files(provider, prompt, files)
+        show = show or self.ui.show
         if runner or provider not in ("claude", "codex"):
             cmd = dispatch.chat_cmd(provider, route["model"], route["effort"], self.sessions.get(provider),
                                     files, str(attach.folder()) if files else None)
-            return (runner or stream)(cmd, prompt, turn, self.ui.show, self._started)
+            return (runner or stream)(cmd, prompt, turn, show, self._started)
         if provider == "codex":
             key, session = (route["model"], route["effort"]), self.sessions.get("codex")
             p = self._codex
@@ -601,18 +602,28 @@ class Chat:
                 p.cancelled = False
             self._live = p
             self._started(p.proc)
-            return p.ask(prompt, turn, self.ui.show, files)
+            return p.ask(prompt, turn, show, files)
         p = self._claude_proc(route)
         self._live = p
         self._started(p.proc)
-        return p.ask(prompt, turn, self.ui.show, files)
+        return p.ask(prompt, turn, show, files)
+
+    def _notes_only(self, kind: str, text: str):
+        if kind == "note":
+            self.ui.show(kind, text)
 
     def send(self, msg: str, runner=None, attachments=()) -> int:
         self._cancelled = False
         self.injected = []
+        self._note_reaction(msg)
+        style, note = learn.style_note()
         tier, reasons, llm = self.route(msg)
         providers = self.order(tier)
+        held = tier in self.cfg.get("loop", {}).get("tiers", [])
+        if held:
+            self.ui.info("jawaban ditahan sampai lolos review")
         code = 1
+        begun = time.time()
         for i, provider in enumerate(providers):
             if self.injected:
                 msg, self.injected = "\n\n".join([msg] + self.injected), []
@@ -621,13 +632,14 @@ class Chat:
                 route["model"] = self.pinned_model
             self.ui.start(tier, provider, route, reasons)
             unseen = self.transcript[self.synced.get(provider, 0):]
-            prompt = recap(unseen) + msg if unseen else msg
+            prompt = (recap(unseen) if unseen else "") + note + msg
             if provider not in self.sessions:
                 prompt = CHAT_NOTE + prompt
             turn = TURNS[provider]()
             started = time.time()
             try:
-                code = self._run(provider, route, prompt, turn, runner, attachments)
+                code = self._run(provider, route, prompt, turn, runner, attachments,
+                                 self._notes_only if held else None)
             except OSError as exc:
                 turn.error, code = _short(str(exc), 300), 1
             self._proc = None
@@ -643,12 +655,18 @@ class Chat:
                     self.sessions[provider] = turn.session
                 if ok:
                     self.ui.done(seconds, turn.usage)
-                    if tier in self.cfg.get("loop", {}).get("tiers", []):
+                    if held:
                         turn = self.refine(msg, tier, provider, route, turn, runner)
+                        self.ui.start(tier, provider, route, ["final"])
+                        self.ui.show("text", turn.text())
+                        self.ui.done(round(time.time() - begun, 1), turn.usage)
+                elif held:
+                    self.ui.show("text", turn.text())
                 reply = turn.text() + (" [dibatalkan]" if code == 130 else "")
                 with self._input_lock:
                     said = "\n\n".join([msg] + self.injected)
                     self.injected = []
+                self._note_reply(said, turn.text(), provider, route["model"], tier, style, code == 130)
                 said += f"\n[lampiran: {', '.join(f.name for f in attachments)}]" if attachments else ""
                 self.transcript += [("User", said), ("Assistant", reply)]
                 self.synced[provider] = len(self.transcript)
@@ -667,12 +685,22 @@ class Chat:
         self.learn_later()
         return code
 
+    def _note_reply(self, prompt, reply, provider, model, tier, style, cancelled):
+        try:
+            self.last_reply = learn.log_reply(prompt, reply, provider, model, tier, style, cancelled)
+        except OSError:
+            self.last_reply = None
+
+    def _note_reaction(self, msg: str):
+        signals = learn.reactions(msg) if self.last_reply else []
+        if signals:
+            try:
+                learn.log_reaction(self.last_reply, signals, msg)
+            except OSError:
+                pass
+
     def learn_later(self):
         threading.Thread(target=learn.teach_if_due, args=(self.cfg,), daemon=True).start()
-
-    def reviewer(self, provider: str) -> str:
-        other = "codex" if provider == "claude" else "claude"
-        return other if other in self.cfg["providers"] else provider
 
     def quota_low(self, providers) -> str | None:
         floor = self.cfg.get("loop", {}).get("min_quota", 20)
@@ -686,45 +714,59 @@ class Chat:
         return None
 
     def refine(self, msg: str, tier: str, provider: str, route: dict, turn, runner):
-        reviewer = self.reviewer(provider)
-        review_route = dict(self.cfg["tiers"][tier][reviewer])
+        limit = self.cfg.get("loop", {}).get("max_rounds", 3)
         rounds = 0
         while not self._cancelled:
-            low = self.quota_low((provider, reviewer))
+            low = self.quota_low((provider,))
             if low:
-                self.ui.info(f"loop berhenti: {low}")
+                self.ui.info(f"review dilewati: {low}")
+                break
+            if rounds == limit:
+                self.ui.info(f"belum lolos setelah {limit} review; ini versi terakhir")
                 break
             rounds += 1
-            self.ui.info(f"review {rounds} oleh {reviewer} {review_route['model']}...")
-            verdict, critique = self.review(msg, turn.text(), reviewer, review_route, tier, runner)
+            self.ui.info(f"review {rounds} oleh {provider} {route['model']} (sesi baru)...")
+            verdict, critique = self.review(msg, turn.text(), provider, route, tier, runner)
             if verdict == "LOLOS":
                 self.ui.info(f"✓ lolos review {rounds}")
                 break
             if verdict != "REVISI":
-                self.ui.info(f"loop berhenti: {critique}")
+                self.ui.info(f"review berhenti: {critique}")
                 break
-            self.ui.info(f"↻ revisi {rounds} dari {reviewer}:\n{critique}")
+            self.ui.info(f"↻ revisi {rounds}:\n{critique}")
+            revised = self.revise(tier, provider, route, critique, rounds, runner)
+            if not revised:
+                break
+            turn = revised
+        return turn
+
+    def revise(self, tier: str, provider: str, route: dict, critique: str, rounds: int, runner):
+        prompt = learn.style_note()[1] + REVISE_PROMPT.format(critique=critique)
+        for attempt in (1, 2):
             self.ui.start(tier, provider, route, [f"revisi {rounds}"])
             revised = TURNS[provider]()
             started = time.time()
             try:
-                code = self._run(provider, route, REVISE_PROMPT.format(reviewer=reviewer, critique=critique),
-                                 revised, runner)
+                code = self._run(provider, route, prompt, revised, runner, show=self._notes_only)
             except OSError as exc:
                 revised.error, code = _short(str(exc), 300), 1
             self._proc = None
             if self._cancelled:
                 code = 130
             seconds = round(time.time() - started, 1)
-            self._log_loop("revise", tier, provider, route, code, seconds, revised.session)
-            if code != 0 or revised.error or not revised.text():
-                self.ui.failed(provider, code, revised.error or "tidak ada jawaban", None)
+            error = "" if code == 0 and revised.text() and not revised.error else revised.error or "tidak ada jawaban"
+            self._log_loop("revise", tier, provider, route, code, seconds, revised.session, error)
+            if not error:
+                if revised.session:
+                    self.sessions[provider] = revised.session
+                self.ui.done(seconds, revised.usage)
+                return revised
+            self.ui.failed(provider, code, error, None)
+            if code == 130 or attempt == 2:
                 break
-            if revised.session:
-                self.sessions[provider] = revised.session
-            self.ui.done(seconds, revised.usage)
-            turn = revised
-        return turn
+            self.ui.info("revisi dicoba sekali lagi")
+        self.ui.info("revisi gagal; ini versi sebelumnya")
+        return None
 
     def review(self, msg: str, answer: str, reviewer: str, route: dict, tier: str, runner) -> tuple[str | None, str]:
         context = recap(self.transcript) if self.transcript else ""
@@ -734,18 +776,18 @@ class Chat:
         try:
             code = (runner or stream)(dispatch.review_cmd(reviewer, route["model"], route["effort"]), prompt, turn,
                                       lambda kind, text: None, self._started)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             turn.error, code = _short(str(exc), 300), 1
         self._proc = None
-        self._log_loop("review", tier, reviewer, route, code, round(time.time() - started, 1), None)
+        self._log_loop("review", tier, reviewer, route, code, round(time.time() - started, 1), None, turn.error)
         if self._cancelled:
             return None, "dibatalkan"
         if code != 0 or turn.error:
             return None, f"review gagal: {turn.error or f'exit {code}'}"
         return parse_review(turn.text())
 
-    def _log_loop(self, mode, tier, provider, route, code, seconds, session):
-        log({
+    def _log_loop(self, mode, tier, provider, route, code, seconds, session, error=""):
+        row = {
             "ts": datetime.now().isoformat(timespec="seconds"),
             "cwd": os.getcwd(),
             "mode": mode,
@@ -756,7 +798,8 @@ class Chat:
             "effort": route["effort"],
             "exit": code,
             "seconds": seconds,
-        })
+        }
+        log({**row, "error": error} if error else row)
 
     def inject(self, msg: str, files=()) -> bool:
         with self._input_lock:

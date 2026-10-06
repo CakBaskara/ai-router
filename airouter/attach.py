@@ -9,7 +9,6 @@ from . import config
 MEDIA = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
 CONVERT = {".bmp", ".tif", ".tiff"}
 MAX_BYTES = 20 * 1024 * 1024
-TOKEN = re.compile(r'"([^"]+)"|\'([^\']+)\'|(\S+)')
 
 
 def folder() -> Path:
@@ -68,14 +67,6 @@ def pick_files() -> list[Path]:
     finally:
         root.destroy()
     return [Path(n) for n in names]
-
-
-def paths_in(text: str) -> list[Path] | None:
-    tokens = [next(g for g in m.groups() if g) for m in TOKEN.finditer(text.strip())]
-    paths = [Path(t) for t in tokens]
-    if paths and all(p.is_absolute() and p.is_file() for p in paths):
-        return paths
-    return None
 
 
 def describe(files: list[Path]) -> str:

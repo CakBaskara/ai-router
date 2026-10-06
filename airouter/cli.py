@@ -21,9 +21,10 @@ def _parse(argv):
     p.add_argument("--no-llm", action="store_true", help="never ask a model to classify")
     p.add_argument("--plain", action="store_true", help="chat as plain text lines instead of the full-screen app")
     p.add_argument("--ml", action="store_true", help="show what the local prompt classifier has learned")
-    p.add_argument("--ml-train", action="store_true",
-                   help="download the embedding model, let the teacher model label past prompts, then report")
+    p.add_argument("--learn", "--ml-train", action="store_true", dest="ml_train",
+                   help="let the teacher model label past prompts and improve the reply style, then report")
     p.add_argument("--ml-auto", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--style", action="store_true", help="show how long and padded the chat answers are, per provider")
     p.add_argument("--quota", action="store_true", help="show the Claude and Codex usage left in the 5-hour and weekly windows")
     return p.parse_args(argv)
 
@@ -51,6 +52,22 @@ def quota_report(data: dict, now: float | None = None) -> str:
     return "\n".join(rows)
 
 
+def style_report(data: dict) -> str:
+    if not data["replies"]:
+        return "belum ada jawaban chat yang tercatat"
+    trial = data["trial"]
+    state = (f"diuji melawan {trial['against']}: {trial['replies']}/{trial['need']} jawaban" if trial
+             else "dipakai")
+    rows = [f"gaya {data['active']} {state}", f"{data['replies']} jawaban terakhir", ""]
+    rows.append(f"{'provider':<8} {'gaya':<8} {'n':>4} {'kata':>5} {'skor':>5} {'stop':>4}  tanda / reaksi")
+    for g in data["groups"]:
+        flags = " ".join(f"{k} {v:.0%}" for k, v in g["flags"].items()) or "-"
+        said = " ".join(f"{k} {v}" for k, v in g["reactions"].items())
+        rows.append(f"{g['provider']:<8} {g['style']:<8} {g['replies']:>4} {g['median_words']:>5} "
+                    f"{g['mean_score']:>5} {g['stopped']:>4}  {flags}" + (f" / {said}" if said else ""))
+    return "\n".join(rows)
+
+
 def main(argv=None) -> int:
     for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(encoding="utf-8")
@@ -62,6 +79,10 @@ def main(argv=None) -> int:
     if args.quota:
         config.save_quota("codex", config.codex_windows(codex.read_limits()))
         print(quota_report(config.load_quota()))
+        return 0
+
+    if args.style:
+        print(style_report(learn.style_report()))
         return 0
 
     if args.ml_auto:
@@ -76,6 +97,8 @@ def main(argv=None) -> int:
         encoder = learn.get_encoder() if c.get("embed", True) else None
         result = learn.retrain(cfg, encoder) if args.ml_train else learn.Learner.load(encoder).report(cfg)
         print(json.dumps(result, indent=2))
+        if args.ml_train:
+            say(f"· {learn.learn_style_locked(cfg)}")
         return 0
 
     prompt = " ".join(args.prompt).strip()
@@ -136,7 +159,7 @@ def main(argv=None) -> int:
         "seconds": round(time.time() - started, 1),
         "prompt": prompt[:500],
     })
-    if learn.teach_due(cfg):
+    if learn.teach_due(cfg) or learn.style_due():
         _learn_detached()
     return code
 

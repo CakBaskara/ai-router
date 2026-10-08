@@ -6,7 +6,7 @@ import sys
 import time
 from datetime import datetime
 
-from . import chat, codex, config, dispatch, learn
+from . import chat, config, dispatch, learn
 from .config import log, say, usage_today
 from .learn import TIERS, classify
 
@@ -75,7 +75,7 @@ def main(argv=None) -> int:
     cfg = config.load()
 
     if args.quota:
-        config.save_quota("codex", config.codex_windows(codex.read_limits()))
+        config.save_quota("codex", config.codex_windows(dispatch.read_limits()))
         print(quota_report(config.load_quota()))
         return 0
 

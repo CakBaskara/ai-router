@@ -15,7 +15,7 @@ from textual.screen import ModalScreen
 from textual.theme import Theme
 from textual.widgets import Button, Markdown, Static, TextArea, Tree
 
-from . import attach, codex, config, learn
+from . import attach, config, dispatch, learn
 from .chat import HELP, Chat
 
 PICKER_ORDER = ("codex", "claude")
@@ -581,7 +581,7 @@ class ChatApp(App):
 
     @work(thread=True)
     def warm_quota(self):
-        config.save_quota("codex", config.codex_windows(codex.read_limits()))
+        config.save_quota("codex", config.codex_windows(dispatch.read_limits()))
         self.call_from_thread(self.refresh_quota)
 
     def refresh_quota(self):

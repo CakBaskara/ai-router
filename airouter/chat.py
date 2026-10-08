@@ -9,8 +9,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import attach, codex, config, dispatch, learn
-from .codex import CodexProc
+from . import attach, config, dispatch, learn
+from .dispatch import CodexProc
 from .config import log, say, usage_today
 from .learn import TIERS, classify
 
@@ -631,7 +631,7 @@ class Chat:
     def quota_low(self, providers) -> str | None:
         floor = self.cfg.get("loop", {}).get("min_quota", 20)
         if "codex" in providers:
-            config.save_quota("codex", config.codex_windows(codex.read_limits()))
+            config.save_quota("codex", config.codex_windows(dispatch.read_limits()))
         data = config.load_quota()
         for provider in dict.fromkeys(providers):
             window = (data.get(provider) or {}).get("5h")

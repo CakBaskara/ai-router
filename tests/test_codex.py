@@ -9,7 +9,7 @@ from textual.widgets import Static
 
 from airouter import config, dispatch
 from airouter.chat import Chat, CodexTurn
-from airouter.codex import CodexProc
+from airouter.dispatch import CodexProc
 from airouter.tui import ChatApp, Composer, Reply, UserBubble
 
 
@@ -80,7 +80,7 @@ class FakeServer:
 @pytest.fixture
 def server(monkeypatch):
     fake = FakeServer()
-    monkeypatch.setattr("airouter.codex.subprocess.Popen", lambda *a, **kw: fake)
+    monkeypatch.setattr("airouter.dispatch.subprocess.Popen", lambda *a, **kw: fake)
     yield fake
     if fake.poll() is None:
         fake.kill()

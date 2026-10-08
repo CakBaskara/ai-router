@@ -280,6 +280,27 @@ def test_vector_cache_survives_restart():
     assert (first.encoded, second.encoded) == (1, 0)
 
 
+def test_few_new_labels_are_saved_but_single_prompts_are_not(monkeypatch):
+    class Disk(learn.Encoder):
+        def __init__(self):
+            self.encoded = 0
+
+        def __call__(self, texts):
+            self.encoded += len(texts)
+            return fake_encoder(texts)
+
+    # The in-memory cache is keyed by id(encoder), and a dead encoder's id can be reused by a new one.
+    monkeypatch.setattr(learn, "_vectors", {})
+    runs = [Disk() for _ in range(4)]
+    learn.vectors(["sudah ada"], runs[0])
+    saved = learn.vectors_path().stat().st_mtime_ns
+    learn.vectors(["prompt chat baru"], runs[1])
+    assert learn.vectors_path().stat().st_mtime_ns == saved
+    learn.vectors(["sudah ada", "label baru 1", "label baru 2"], runs[2])
+    learn.vectors(["sudah ada", "label baru 1", "label baru 2"], runs[3])
+    assert runs[3].encoded == 0
+
+
 def test_teacher_runs_on_its_own_once_enough_prompts_wait(monkeypatch):
     monkeypatch.setattr(learn, "teach_due", REAL_TEACH_DUE)
     monkeypatch.setattr(dispatch, "llm_classify_batch", lambda prompts, model: ["heavy"] * len(prompts))

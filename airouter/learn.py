@@ -84,7 +84,6 @@ _lock = threading.Lock()
 _encoder = None
 _failed = None
 _vectors = {}
-_CACHE_SAVE_BATCH = 64
 
 
 def model_folder() -> Path:
@@ -158,7 +157,11 @@ def warm_encoder(info=lambda text: None):
     except OSError as exc:
         info(f"model klasifikasi tidak bisa diunduh, pakai Naive Bayes: {exc}")
         return None
-    return get_encoder()
+    encoder = get_encoder()
+    model = Learner.load(encoder)
+    if encoder and len({r["tier"] for r in model.rows}) > 1:
+        model._classifier(model.rows)
+    return encoder
 
 
 def _key(text: str) -> str:
@@ -192,11 +195,12 @@ def vectors(texts: list[str], encoder):
             pass
     keys = [_key(t) for t in texts]
     missing = list(dict.fromkeys(t for t, k in zip(texts, keys) if k not in cache))
-    before = len(cache)
     for i in range(0, len(missing), 16):
         batch = missing[i:i + 16]
         cache.update(zip(map(_key, batch), encoder(batch)))
-    if missing and disk and (len(cache) - before >= _CACHE_SAVE_BATCH or not vectors_path().exists()):
+    # A single chat prompt is not saved, so the file is not rewritten on every message; labels arrive in batches
+    # and are saved at once, or the next start encodes them again.
+    if missing and disk and (len(texts) > 1 or not vectors_path().exists()):
         _save_vectors(cache, vectors_path())
     return np.stack([cache[k] for k in keys])
 

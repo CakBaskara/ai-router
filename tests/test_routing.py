@@ -3,6 +3,7 @@ import random
 import subprocess
 import time
 import zlib
+from unittest.mock import Mock
 
 import pytest
 
@@ -103,19 +104,38 @@ def test_batch_classify_parses_json_array(monkeypatch):
     assert dispatch.llm_classify_batch(["a"], "sonnet") == [None]
 
 
-def test_chat_audits_confident_ml_decision_in_background(monkeypatch):
+@pytest.mark.parametrize("previous_tier, floor", [(None, "light"), ("light", "light"),
+                                                 ("heavy", "medium")])
+def test_chat_audits_confident_ml_decision_in_background(monkeypatch, previous_tier, floor):
     calls = []
     monkeypatch.setattr(learn, "judge", lambda *a, **k: ("light", "ml: light 0.97", False))
     monkeypatch.setattr(learn, "audit_due", lambda cfg: True)
     monkeypatch.setattr(learn, "audit", lambda *a: calls.append(a))
-    c = Chat(CFG)
-    c.use_llm = True
-    c.route("halo semuanya")
+    cfg = {**CFG, "chat": {"min_tier": floor}}
+    c = Chat(cfg)
+    c.tier = previous_tier
+    tier, _, llm = c.route("halo semuanya")
     for _ in range(50):
         if calls:
             break
         time.sleep(0.01)
-    assert calls == [("halo semuanya", "light", CFG)]
+    assert calls == [("halo semuanya", "light", cfg)]
+    assert tier == (previous_tier or floor) and not llm
+
+
+@pytest.mark.parametrize("case", ["keyword", "pinned", "llm", "unsure", "disabled", "rate",
+                                 "no_fallback"])
+def test_chat_skips_audit_without_an_eligible_ml_decision(monkeypatch, case):
+    thread = Mock()
+    guess = ("medium", "llm: medium", True) if case == "llm" else (
+        (None, None, False) if case == "unsure" else ("light", "ml: light 0.97", False))
+    monkeypatch.setattr(learn, "judge", lambda *a, **k: guess)
+    monkeypatch.setattr(learn, "audit_due", lambda cfg: case != "rate")
+    monkeypatch.setattr("airouter.chat.threading.Thread", thread)
+    cfg = {**CFG, "classifier": {**CFG["classifier"], "llm_fallback": case != "no_fallback"}}
+    c = Chat(cfg, use_llm=case != "disabled", tier="heavy" if case == "pinned" else None)
+    c.route("apa itu LC3" if case == "keyword" else "halo semuanya")
+    thread.assert_not_called()
 
 
 def test_audit_rate_from_config():

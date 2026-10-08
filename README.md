@@ -65,6 +65,9 @@ plain text. Type `/help` for the rest.
 
 The local model learns as you go. It learns from Haiku's answers, from random spot checks,
 and from you: switching the model after an answer counts as a correction.
+In chat, 10% of confident ML predictions are checked by Haiku in the background, including
+follow-up messages. The check uses the ML prediction before the chat's minimum or retained
+tier is applied; pinned tiers, keyword decisions, and `--no-llm` skip these checks.
 Every 25 new prompts, Sonnet labels them in the background. `ai --learn` does it right away.
 
 ## How answers stay short

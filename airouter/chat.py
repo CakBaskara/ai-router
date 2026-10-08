@@ -526,7 +526,7 @@ class Chat:
             if guess:
                 tier = guess
                 reasons.append(why)
-            if guess and not llm and ask and learn.audit_due(self.cfg):
+            if guess and not llm and self.use_llm and learn.audit_due(self.cfg):
                 threading.Thread(target=learn.audit, args=(msg, guess, self.cfg), daemon=True).start()
         floor = self.cfg.get("chat", {}).get("min_tier")
         if floor and higher(floor, tier) != tier:

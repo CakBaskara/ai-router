@@ -111,3 +111,16 @@ def test_report_shows_the_trial(monkeypatch):
     learn.learn_style(CFG)
     fill(learn.style_note()[0], CLEAN, 3)
     assert f"diuji melawan {default_id()}: 3/{learn.STYLE_MIN}" in cli.style_report(learn.style_report())
+
+
+def test_ai_tells_are_flagged():
+    from airouter import learn
+    assert "tell" in learn.ramble("apa", "It's not just a feature, it's a shift.")["flags"]
+    assert "tell" in learn.ramble("apa", "Ini bukan cuma soal cepat, tapi soal biaya.")["flags"]
+    assert "tell" in learn.ramble("apa", "Jujur? Tergantung.")["flags"]
+    assert "tell" not in learn.ramble("apa", "Bisa. Ini bukan bug, cuma cache lama.")["flags"]
+
+
+def test_style_note_always_carries_human_rules():
+    from airouter import learn
+    assert learn.style_note()[1].rstrip().endswith(learn.HUMAN_RULES.strip())

@@ -700,6 +700,10 @@ CLOSER = re.compile(r"semoga (?:membantu|bermanfaat|jelas)|jangan ragu|(?:kalau|
                     r"(?:pertanyaan|yang)|ada lagi yang|let me know|hope (?:this|that) helps|feel free", re.I)
 ECHO = re.compile(r"\b(?:anda|kamu|you) (?:bertanya|menanyakan|ingin tahu|asked|are asking|want to know)\b"
                   r"|\bpertanyaan (?:anda|kamu)\b", re.I)
+TELL = re.compile(r"\b(?:it'?s|this is|is) not (?:just|only|merely)\b|\bisn'?t (?:just|only|merely)\b"
+                  r"|\bbukan (?:cuma|hanya|sekadar|sekedar)\b.{0,80}?\b(?:tapi|tetapi|melainkan)\b"
+                  r"|here'?s the thing|let'?s dive|let that sink in|\bhonestly\?|\bjujur(?: saja| aja)?\?"
+                  r"|\bat its core\b|\bdelv(?:e|es|ing)\b|\btestament to\b|\btapestry\b|\bgame.?changer\b", re.I)
 REACTIONS = {
     "too_long": re.compile(r"\b(?:singkat(?:nya|in)?|ringkas(?:nya|in)?|intinya|to the point|kepanjangan|terlalu "
                            r"panjang|bertele|ng?e?lantur|muter|basa.?basi|too long|tl;?dr)\b", re.I),
@@ -731,6 +735,8 @@ def ramble(prompt: str, reply: str) -> dict:
         flags.append("closer")
     if ECHO.search(prose.strip()[:200]):
         flags.append("echo")
+    if TELL.search(prose):
+        flags.append("tell")
     if len(asked) <= SHORT_PROMPT and len(words) > LONG_REPLY:
         flags.append("long")
     if len(words) < LONG_REPLY and re.search(r"^#{1,6} ", prose, re.M):
@@ -804,6 +810,12 @@ DEFAULT_STYLE = (
     "to compare several things, and headings only in long answers. Leave out details nobody asked for; offer them "
     "in one short line instead."
 )
+HUMAN_RULES = (
+    " Write like a person, not a chatbot: state the point directly instead of \"not X but Y\", no run-up like "
+    "\"here's the thing\" or \"jujur?\", no deep-sounding sayings or one-line punchlines, no arguing against "
+    "objections nobody raised, no inflated significance or sales words, no bold or emoji as decoration, and list "
+    "as many items as the point needs rather than three by habit."
+)
 STYLE_MIN = 30
 STYLE_MAX_CHARS = 1000
 STYLE_EXAMPLES = 8
@@ -813,11 +825,12 @@ STYLE_PROMPT = (
     "assistants. The user wants answers that read like a colleague talking: the answer first, no padding, no "
     "rambling, short but complete. The input is JSON with the current note, notes that were tried and did not "
     "help, the current note's stats, and recent replies that went badly. Flags: opener, closer, echo (restates "
-    "the question), long (short question, long answer), headings (headings in a short answer). Reactions come "
-    "from the user's next message: too_long, unclear (too terse or vague), off (missed the point). cancelled "
-    "means the user stopped the answer. Write a new note that fixes the patterns you see without making answers "
-    "cryptic. Keep the rules that work, say each rule once, at most 120 words, plain English sentences addressed "
-    "to the assistant. Do not mention topics, people or these examples. Reply with the note text only."
+    "the question), long (short question, long answer), headings (headings in a short answer), tell "
+    "(AI-sounding phrasing such as \"not X but Y\" or a staged run-up). Reactions come from the user's next "
+    "message: too_long, unclear (too terse or vague), off (missed the point). cancelled means the user stopped "
+    "the answer. Write a new note that fixes the patterns you see without making answers cryptic. A fixed rule "
+    "against AI-sounding phrasing is always appended after your note, so do not repeat it. Keep the rules that "
+    "work, say each rule once, at most 120 words, plain English sentences addressed to the assistant. Do not mention topics, people or these examples. Reply with the note text only."
 )
 
 
@@ -843,7 +856,7 @@ def current_style() -> str:
 
 def style_note() -> tuple[str, str]:
     text = current_style()
-    return style_id(text), STYLE_HEAD + text + "\n\n"
+    return style_id(text), STYLE_HEAD + text + HUMAN_RULES + "\n\n"
 
 
 def _style_state() -> dict:

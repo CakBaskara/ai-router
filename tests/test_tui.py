@@ -326,7 +326,10 @@ def test_idle_sticky_header_is_not_redrawn():
             app.end_reply("●", "✓", False)
             log = app.query_one("#log", VerticalScroll)
             log.scroll_end(animate=False)
-            await pilot.pause(0.3)
+            for _ in range(60):
+                await pilot.pause(0.05)
+                if app.query_one("#sticky").visible:
+                    break
             assert app.query_one("#sticky").visible
             who = app.query_one("#sticky-who", Static)
             calls = []

@@ -39,14 +39,18 @@ def make_app():
     return app
 
 
+async def _until(pilot, done, timeout=3.0, step=0.05):
+    for _ in range(int(timeout / step)):
+        await pilot.pause(step)
+        if done():
+            return
+
+
 async def _type_and_send(pilot, text):
     composer = pilot.app.query_one(Composer)
     composer.insert(text)
     await pilot.press("enter")
-    for _ in range(50):
-        await pilot.pause(0.05)
-        if not pilot.app.busy:
-            break
+    await _until(pilot, lambda: not pilot.app.busy)
     await pilot.pause(0.2)
 
 
@@ -166,10 +170,7 @@ def test_prompt_sent_while_busy_is_queued_then_sent():
             await pilot.pause(0.1)
             assert app.queue and app.query(UserBubble)[-1].has_class("queued")
             release.set()
-            for _ in range(60):
-                await pilot.pause(0.05)
-                if len(sent) == 2 and not app.busy:
-                    break
+            await _until(pilot, lambda: len(sent) == 2 and not app.busy)
             assert sent == ["pertama", "kedua"] and not app.queue
             assert not app.query(UserBubble)[-1].has_class("queued")
     asyncio.run(go())
@@ -297,10 +298,7 @@ def test_long_reply_keeps_running_and_finished_status_visible():
             await pilot.pause(0.2)
             log = app.query_one("#log", VerticalScroll)
             log.scroll_end(animate=False)
-            for _ in range(20):
-                await pilot.pause(0.05)
-                if app.query_one("#sticky").visible:
-                    break
+            await _until(pilot, lambda: app.query_one("#sticky").visible)
             sticky = app.query_one("#sticky")
             assert sticky.visible
             assert "gpt-6-sol" in str(app.query_one("#sticky-who").render())
@@ -325,10 +323,7 @@ def test_idle_sticky_header_is_not_redrawn():
             app.end_reply("●", "✓", False)
             log = app.query_one("#log", VerticalScroll)
             log.scroll_end(animate=False)
-            for _ in range(60):
-                await pilot.pause(0.05)
-                if app.query_one("#sticky").visible:
-                    break
+            await _until(pilot, lambda: app.query_one("#sticky").visible)
             assert app.query_one("#sticky").visible
             who = app.query_one("#sticky-who", Static)
             calls = []
@@ -385,10 +380,7 @@ def test_prompt_sent_while_claude_answers_is_injected_not_queued():
             assert not app.query(UserBubble)[-1].has_class("queued")
             assert len(app.query(Reply)) == 2
             release.set()
-            for _ in range(40):
-                await pilot.pause(0.05)
-                if not app.busy:
-                    break
+            await _until(pilot, lambda: not app.busy)
             assert not app.busy
     asyncio.run(go())
 
@@ -417,23 +409,21 @@ def test_prompt_queued_during_startup_joins_active_reply():
 
         app.chat.inject = inject
         async with app.run_test(size=(100, 32)) as pilot:
-            await _type_and_send(pilot, "pertama")
-            await _type_and_send(pilot, "kedua")
+            app.query_one(Composer).insert("pertama")
+            await pilot.press("enter")
+            await _until(pilot, lambda: app.query(Reply))
+            app.query_one(Composer).insert("kedua")
+            await pilot.press("enter")
+            await _until(pilot, lambda: app.queue)
             assert len(app.queue) == 1
             assert app.query(UserBubble)[-1].has_class("queued")
             ready = True
-            for _ in range(20):
-                await pilot.pause(0.05)
-                if injected:
-                    break
+            await _until(pilot, lambda: injected)
             assert injected == ["kedua"]
             assert not app.queue
             assert not app.query(UserBubble)[-1].has_class("queued")
             release.set()
-            for _ in range(40):
-                await pilot.pause(0.05)
-                if not app.busy:
-                    break
+            await _until(pilot, lambda: not app.busy)
             assert not app.busy
 
     asyncio.run(go())
@@ -455,10 +445,7 @@ def test_changed_code_reloads_between_back_to_back_prompts_and_keeps_the_next_on
         again.chat._catalog = app.chat._catalog
         again.chat.send = lambda text, attachments=(): Chat.send(again.chat, text, runner=fake_runner)
         async with again.run_test(size=(100, 32)) as pilot:
-            for _ in range(50):
-                await pilot.pause(0.05)
-                if again.query(Reply) and not again.busy:
-                    break
+            await _until(pilot, lambda: again.query(Reply) and not again.busy)
             assert again.chat.transcript[-2] == ("User", "prompt berikutnya")
             assert not again.queue
     asyncio.run(go())

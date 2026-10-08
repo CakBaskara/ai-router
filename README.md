@@ -59,7 +59,8 @@ plain text. Type `/help` for the rest.
 3. Each tier goes to Claude or Codex, whichever I've used less today. Free providers, when
    turned on, go first for light and medium.
 4. If one fails, the next one takes over.
-5. In the chat, a heavy answer is held back and reviewed by a fresh run of the same model. It gets
+5. In the chat, an answer from a top model (Claude Fable 5 or newer, Codex GPT-6-Astra or newer) is
+   held back and reviewed by a fresh run of the same model. It gets
    revised until the review passes it, for at most 3 rounds, or until the model has less than 20% of
    its 5-hour quota left. Only the final version is shown.
 

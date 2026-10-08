@@ -78,6 +78,15 @@ def parse_review(text: str) -> tuple[str | None, str]:
     return verdict, critique if verdict == "REVISI" else ""
 
 
+def review_due(cfg: dict, provider: str, model: str) -> bool:
+    family, _, least = cfg.get("loop", {}).get("models", {}).get(provider, "").partition(" ")
+    if not family or family.lower() not in re.split(r"[-._ ]", model.lower()):
+        return False
+    # Long digit runs are release dates, not versions; a bare alias like "fable" points at the newest version.
+    have = [int(n) for n in re.findall(r"\d+", model) if len(n) < 6]
+    return not have or have >= [int(n) for n in re.findall(r"\d+", least)]
+
+
 def higher(a: str, b: str) -> str:
     return a if TIERS.index(a) >= TIERS.index(b) else b
 
@@ -619,9 +628,6 @@ class Chat:
         style, note = learn.style_note()
         tier, reasons, llm = self.route(msg)
         providers = self.order(tier)
-        held = tier in self.cfg.get("loop", {}).get("tiers", [])
-        if held:
-            self.ui.info("jawaban ditahan sampai lolos review")
         code = 1
         begun = time.time()
         for i, provider in enumerate(providers):
@@ -630,6 +636,9 @@ class Chat:
             route = dict(self.cfg["tiers"][tier][provider])
             if self.pinned_model and provider == self.pinned_provider:
                 route["model"] = self.pinned_model
+            held = review_due(self.cfg, provider, route["model"])
+            if held:
+                self.ui.info("jawaban ditahan sampai lolos review")
             self.ui.start(tier, provider, route, reasons)
             unseen = self.transcript[self.synced.get(provider, 0):]
             prompt = (recap(unseen) if unseen else "") + note + msg

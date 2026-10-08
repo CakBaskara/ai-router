@@ -3,7 +3,7 @@ import threading
 import time
 
 from airouter import cli, config, dispatch, learn
-from airouter.chat import CHAT_NOTE, Chat, ClaudeTurn, CodexTurn, parse_review, recap
+from airouter.chat import CHAT_NOTE, Chat, ClaudeTurn, CodexTurn, parse_review, recap, review_due
 
 CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing", "loop")}, "providers": ["claude", "codex"]}
 
@@ -414,7 +414,9 @@ def test_quota_report_lists_both_providers():
     assert "codex   5 jam   sisa  75%" in text and "claude  belum ada data" in text
 
 
-LOOP_CFG = {**CFG, "loop": {"tiers": ["heavy"], "min_quota": 20}}
+LOOP_CFG = {**CFG, "tiers": {**CFG["tiers"], "heavy": {**CFG["tiers"]["heavy"],
+                                                       "claude": {"model": "claude-fable-5-1", "effort": "high"}}},
+            "loop": {"models": {"claude": "fable 5", "codex": "astra 6"}, "min_quota": 20}}
 
 
 class RecordUI:
@@ -462,7 +464,7 @@ def test_heavy_answer_is_self_reviewed_and_only_final_is_shown():
     assert c.transcript[-1] == ("Assistant", "versi 2")
     assert [t for k, t in ui.shown if k == "text"] == ["versi 2"]
     reviews = [i for i, (cmd, _) in enumerate(calls) if "--no-session-persistence" in cmd]
-    assert reviews == [1, 3] and all("opus" in calls[i][0] for i in reviews)
+    assert reviews == [1, 3] and all("claude-fable-5-1" in calls[i][0] for i in reviews)
     assert "versi 1" in calls[1][1] and "hitung ulang anggaran" in calls[1][1]
     assert "- angka salah" in calls[2][1]
     rows = [json.loads(line) for line in config.log_path().read_text(encoding="utf-8").splitlines()]
@@ -487,7 +489,7 @@ def test_loop_stops_after_max_rounds_with_last_version():
         replies += [(0, claude_reply("REVISI\n- lagi")), (0, claude_reply(f"versi {n}"))]
     run, calls = fake_runner(replies)
     ui = RecordUI()
-    c = Chat({**LOOP_CFG, "loop": {"tiers": ["heavy"], "min_quota": 20, "max_rounds": 2}},
+    c = Chat({**LOOP_CFG, "loop": {**LOOP_CFG["loop"], "max_rounds": 2}},
              provider="claude", tier="heavy", use_llm=False, ui=ui)
     assert c.send("rancang arsitektur", runner=run) == 0
     assert len(calls) == 5 and c.transcript[-1] == ("Assistant", "versi 3")
@@ -510,10 +512,27 @@ def test_loop_stops_when_quota_is_low():
     assert len(calls) == 1 and c.transcript[-1] == ("Assistant", "jawaban")
 
 
-def test_loop_skips_tiers_not_listed():
+def test_loop_skips_models_not_listed():
     run, calls = fake_runner([(0, claude_reply("ok"))])
     c = Chat(LOOP_CFG, provider="claude", tier="medium", use_llm=False)
     assert c.send("fix bug ini", runner=run) == 0 and len(calls) == 1
+
+
+def test_review_only_for_listed_families_at_or_above_version():
+    due = [m for m in ("claude-fable-5-1", "claude-fable-5", "fable", "claude-opus-5-5", "opus", "sonnet")
+           if review_due(LOOP_CFG, "claude", m)]
+    assert due == ["claude-fable-5-1", "claude-fable-5", "fable"]
+    due = [m for m in ("gpt-6-astra", "gpt-6.1-astra", "gpt-7-astra", "gpt-5.6-astra", "gpt-6.1-sol", "gpt-6-sol")
+           if review_due(LOOP_CFG, "codex", m)]
+    assert due == ["gpt-6-astra", "gpt-6.1-astra", "gpt-7-astra"]
+    assert not review_due(LOOP_CFG, "gemini", "gemini-3.8-flash") and not review_due(CFG, "claude", "fable")
+
+
+def test_pinned_high_model_is_reviewed_in_any_tier():
+    run, calls = fake_runner([(0, claude_reply("jawaban")), (0, claude_reply("LOLOS"))])
+    c = Chat(LOOP_CFG, provider="claude", tier="medium", use_llm=False, ui=RecordUI())
+    c.pinned_provider, c.pinned_model = "claude", "claude-fable-5-1"
+    assert c.send("fix bug ini", runner=run) == 0 and len(calls) == 2
 
 
 def test_unreadable_review_keeps_first_answer():

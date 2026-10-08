@@ -1,6 +1,7 @@
 import asyncio
 
-from textual.widgets import Markdown
+from textual.app import App
+from textual.widgets import Markdown, Static
 
 from airouter import config
 from airouter.chat import Chat
@@ -315,6 +316,28 @@ def test_long_reply_keeps_running_and_finished_status_visible():
     asyncio.run(go())
 
 
+def test_idle_sticky_header_is_not_redrawn():
+    async def go():
+        app = make_app()
+        async with app.run_test(size=(80, 20)) as pilot:
+            app.start_reply("gpt-6-sol", "codex · medium · medium")
+            await pilot.pause()
+            app.reply_show("text", "\n\n".join(f"baris {i}" for i in range(40)))
+            app.end_reply("●", "✓", False)
+            log = app.query_one("#log", VerticalScroll)
+            log.scroll_end(animate=False)
+            await pilot.pause(0.3)
+            assert app.query_one("#sticky").visible
+            who = app.query_one("#sticky-who", Static)
+            calls = []
+            original = who.update
+            who.update = lambda *args, **kwargs: (calls.append(args), original(*args, **kwargs))
+            await pilot.pause(0.5)
+            assert calls == []
+
+    asyncio.run(go())
+
+
 def test_reload_keeps_unsent_draft():
     async def go():
         app = make_app()
@@ -504,4 +527,42 @@ def test_bottom_of_log_holds_still_while_header_sticks():
                 await pilot.pause(0.1)
                 seen.add((log.scroll_y, log.size.height))
             assert len(seen) == 1 and log.scroll_y == log.max_scroll_y
+    asyncio.run(go())
+
+
+class _Bare(App):
+    def compose(self):
+        return []
+
+
+def test_reply_finished_before_mount_shows_end_without_spinner():
+    async def go():
+        app = _Bare()
+        async with app.run_test() as pilot:
+            reply = Reply("haiku", "claude")
+            app.mount(reply)
+            assert not reply.ready
+            reply.finish("✗", "gagal")
+            await pilot.pause()
+            assert reply.timer is None
+            assert str(reply.query_one(".who").render()) == "✗ haiku"
+            assert str(reply.query_one(".stats").render()) == "gagal"
+    asyncio.run(go())
+
+
+def test_reply_streamed_before_mount_keeps_text_and_tools():
+    async def go():
+        app = _Bare()
+        async with app.run_test() as pilot:
+            reply = Reply("sonnet", "claude")
+            app.mount(reply)
+            assert not reply.ready
+            reply.add_tool("Read iso.c")
+            reply.write("jawaban ")
+            reply.write("akhir")
+            reply.finish("●", "✓ 1s")
+            await pilot.pause()
+            assert reply.query_one(Markdown).source == "jawaban akhir"
+            assert "Read iso.c" in str(reply.query_one(".tools").render())
+            assert str(reply.query_one(".stats").render()) == "✓ 1s"
     asyncio.run(go())

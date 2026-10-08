@@ -168,6 +168,9 @@ class Reply(Vertical):
         self.done = done
         self.tools = []
         self.frame = 0
+        self.timer = None
+        self.ready = False
+        self.end = None
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="head"):
@@ -180,20 +183,45 @@ class Reply(Vertical):
     def on_mount(self):
         self.query_one(".head").styles.height = 1
         self.query_one(".who").styles.width = "auto"
-        self.timer = self.set_interval(0.08, self.spin, pause=self.done)
+        self.ready = True
+        if self.tools:
+            self.show_tools()
+        if self.end:
+            self.show_end(*self.end)
+        elif not self.done:
+            self.timer = self.set_interval(0.08, self.spin)
 
     def spin(self):
         self.frame += 1
         self.query_one(".who", Static).update(f"{SPINNER[self.frame % len(SPINNER)]} {self.model}")
 
+    def write(self, text: str):
+        shown = self.query(Markdown)
+        if shown:
+            return shown.first().append(text)
+        self.text += text
+        return None
+
     def add_tool(self, text: str):
         self.tools.append(text)
+        if self.ready:
+            self.show_tools()
+
+    def show_tools(self):
         tools = self.query_one(".tools", Static)
         tools.update("\n".join(f"⎿ {t}" for t in self.tools))
         tools.display = True
 
     def finish(self, mark: str, stats: str):
-        self.timer.stop()
+        # The worker thread can stream into and finish a reply before Textual has mounted it.
+        self.done = True
+        self.end = (mark, stats)
+        if self.timer:
+            self.timer.stop()
+        if self.ready:
+            self.show_end(mark, stats)
+
+    def show_end(self, mark: str, stats: str):
         self.query_one(".who", Static).update(f"{mark} {self.model}")
         self.query_one(".stats", Static).update(stats)
 
@@ -583,11 +611,18 @@ class ChatApp(App):
         top = log.content_region.y
         visible = next((reply for reply in reversed(list(log.query(Reply)))
                         if reply.region.y < top < reply.region.bottom), None)
+        heads = {target: visible.query_one(source, Static).render()
+                 for target, source in (("#sticky-who", ".who"), ("#sticky-why", ".why"))} if visible else {}
+        shown = {target: str(content) for target, content in heads.items()}
+        # Each update reflows the whole log, and this runs ten times a second; touching the
+        # widgets only on a change keeps an idle window from burning a CPU core.
+        if shown == getattr(self, "_sticky_shown", None):
+            return
+        self._sticky_shown = shown
         stickies[0].visible = visible is not None
-        if visible:
-            for target, source in (("#sticky-who", ".who"), ("#sticky-why", ".why")):
-                for widget in self.query(target):
-                    widget.update(visible.query_one(source, Static).render())
+        for target, content in heads.items():
+            for widget in self.query(target):
+                widget.update(content)
 
     def _mount(self, widget):
         self.query_one("#log", VerticalScroll).mount(widget)
@@ -608,7 +643,7 @@ class ChatApp(App):
             return None
         if kind == "break":
             text = "\n\n"
-        return self.reply.query_one(Markdown).append(text)
+        return self.reply.write(text)
 
     def end_reply(self, mark: str, stats: str, failed: bool):
         if self.reply:

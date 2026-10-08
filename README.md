@@ -21,12 +21,6 @@ You need Python 3.11+ and at least one of these CLIs, logged in:
 - Claude Code: `npm i -g @anthropic-ai/claude-code`
 - Codex: `npm i -g @openai/codex`
 
-Gemini and Copilot are supported but off by default. To use them, add them to `providers` and
-`routing.free` in `airouter/config.toml`:
-
-- Gemini: `npm i -g @google/gemini-cli`, with a free key from aistudio.google.com/apikey in `GEMINI_API_KEY`
-- Copilot: `npm i -g @github/copilot`
-
 ```powershell
 git clone https://github.com/CakBaskara/ai-router
 cd ai-router
@@ -90,7 +84,6 @@ answers and kept only if it scores better; otherwise the old one comes back. The
   after the turn has ended starts a follow-up reply. Model-switch commands take effect between turns.
 - Claude and Codex chat sessions include the current project and the ai-router installation folder as writable
   locations. Restart a session to pick up changes to its directory permissions.
-- Free is slower: Claude takes about 2 s, Codex 5 s, Copilot up to 37 s, Gemini up to 50 s.
 - Settings live in `airouter/config.toml`. Every route is logged to `logs/routes.jsonl`.
 
 ## License

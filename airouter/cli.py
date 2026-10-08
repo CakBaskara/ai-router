@@ -16,7 +16,7 @@ def _parse(argv):
     p.add_argument("prompt", nargs="*", help="prompt text; read from stdin when omitted")
     p.add_argument("-i", "--interactive", action="store_true", help="open an interactive session in the current folder")
     p.add_argument("-t", "--tier", choices=TIERS, help="force a tier")
-    p.add_argument("-p", "--provider", choices=["gemini", "copilot", "claude", "codex"], help="force a provider")
+    p.add_argument("-p", "--provider", choices=["claude", "codex"], help="force a provider")
     p.add_argument("-n", "--dry-run", action="store_true", help="show the route without running it")
     p.add_argument("--no-llm", action="store_true", help="never ask a model to classify")
     p.add_argument("--plain", action="store_true", help="chat as plain text lines instead of the full-screen app")
@@ -73,8 +73,6 @@ def main(argv=None) -> int:
         stream.reconfigure(encoding="utf-8")
     args = _parse(argv if argv is not None else sys.argv[1:])
     cfg = config.load()
-    config.sync_rules()
-    dispatch.load_user_env("GEMINI_API_KEY")
 
     if args.quota:
         config.save_quota("codex", config.codex_windows(codex.read_limits()))
@@ -127,7 +125,7 @@ def main(argv=None) -> int:
                 tier = guess
                 reasons = reasons + [why]
 
-    providers = [args.provider] if args.provider else chat.lineup(cfg, tier, usage=usage_today())
+    providers = [args.provider] if args.provider else chat.lineup(cfg, usage=usage_today())
     if args.interactive:
         providers = providers[:1]
 

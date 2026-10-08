@@ -21,7 +21,7 @@ HELP = (
     "/model auto               kembali ke routing otomatis\n"
     "/models                   daftar model yang bisa dipilih\n"
     "/model 3  /model sol      pilih model dari daftar (nomor atau nama)\n"
-    "/claude /codex /gemini /copilot  kunci provider\n"
+    "/claude /codex             kunci provider\n"
     "/codex gpt-5.6-sol        kunci provider dan model persis\n"
     "pakai opus  ganti ke codex  pakai auto   sama seperti /model dan /<provider>\n"
     "ganti model yang lebih ringan punya codex  turun/naik satu tier, boleh sebut provider\n"
@@ -30,7 +30,7 @@ HELP = (
 )
 CHAT_NOTE = (
     "[Context from the `ai` chat app, not from the user] You are answering inside `ai`, the user's terminal chat "
-    "that routes each message to Claude Code, Codex, Gemini or Copilot CLI and picks the model automatically. "
+    "that routes each message to Claude Code or Codex CLI and picks the model automatically. "
     "Other assistants may have answered earlier turns; treat their answers as part of this conversation. You cannot switch "
     "models yourself. If the user wants another model, tell them to type /models for the list, /model <number or "
     "name> to pick one, or /model auto to go back to automatic routing; a short message such as \"pakai opus\" or "
@@ -231,84 +231,9 @@ class CodexTurn:
         return None
 
 
-class GeminiTurn:
-    def __init__(self):
-        self.session = None
-        self.reply = []
-        self.usage = ""
-        self.error = None
-        self.after_tool = False
-
-    def feed(self, ev: dict):
-        kind = ev.get("type")
-        if kind == "init":
-            self.session = ev.get("session_id")
-        elif kind == "message" and ev.get("role") == "assistant":
-            text = ev.get("content", "")
-            if self.after_tool and self.reply:
-                text = "\n\n" + text
-            self.after_tool = False
-            self.reply.append(text)
-            return "text", text
-        elif kind == "tool_use":
-            self.after_tool = True
-            return "note", _tool(ev.get("tool_name", ""), ev.get("parameters") or {})
-        elif kind == "tool_result" and ev.get("status") != "success":
-            return "note", _short(f"gagal: {ev.get('error', {}).get('message') or ev.get('status')}", 200)
-        elif kind == "result":
-            s = ev.get("stats", {})
-            self.usage = (f"in {_k(s.get('input_tokens', 0))} (cache {_k(s.get('cached', 0))})"
-                          f" · out {_k(s.get('output_tokens', 0))}")
-            if ev.get("status") != "success":
-                self.error = _short((ev.get("error") or {}).get("message") or ev.get("status") or "error", 300)
-        elif kind == "error":
-            self.error = _short(ev.get("message") or "error", 300)
-        return None
-
-    def text(self) -> str:
-        return "".join(self.reply).strip()
-
-
-class CopilotTurn:
-    def __init__(self):
-        self.session = None
-        self.reply = []
-        self.usage = ""
-        self.error = None
-
-    def feed(self, ev: dict):
-        kind = ev.get("type")
-        data = ev.get("data", {})
-        if kind == "assistant.message_start" and self.reply:
-            self.reply.append("\n\n")
-            return "break", ""
-        if kind == "assistant.message_delta":
-            text = data.get("deltaContent", "")
-            self.reply.append(text)
-            return "text", text
-        if kind == "tool.execution_start":
-            return "note", _tool(data.get("toolName", ""), data.get("arguments") or {})
-        if kind == "tool.execution_complete" and not data.get("success"):
-            return "note", _short(f"gagal: {(data.get('error') or {}).get('message', '')}", 200)
-        if kind == "session.error":
-            self.error = _short(data.get("message") or "error", 300)
-        elif kind == "result":
-            self.session = ev.get("sessionId")
-            premium = ev.get("usage", {}).get("premiumRequests")
-            self.usage = f"premium request {premium}" if premium is not None else ""
-            if ev.get("exitCode"):
-                self.error = self.error or f"exit {ev['exitCode']}"
-        return None
-
-    def text(self) -> str:
-        return "".join(self.reply).strip()
-
-
 def with_files(provider: str, prompt: str, files) -> str:
     if not files:
         return prompt
-    if provider == "gemini":
-        return prompt + "\n\n" + " ".join("@" + str(f).replace("\\", "/") for f in files)
     listed = "\n".join(f"- {f}" for f in files)
     return f"{prompt}\n\nAttached files (read them with your tools if they are not shown inline):\n{listed}"
 
@@ -323,24 +248,15 @@ def image_blocks(files) -> list[dict]:
     return blocks
 
 
-TURNS = {"claude": ClaudeTurn, "codex": CodexTurn, "gemini": GeminiTurn, "copilot": CopilotTurn}
+TURNS = {"claude": ClaudeTurn, "codex": CodexTurn}
 
 
-def lineup(cfg: dict, tier: str, sticky: str | None = None, usage: dict | None = None) -> list[str]:
-    routing = cfg.get("routing", {})
-    providers = list(cfg["providers"])
-    free = [p for p in providers if p in routing.get("free", [])]
-    paid = [p for p in providers if p not in free]
-    if usage:
-        paid.sort(key=lambda p: usage.get(p, 0))
-    free_first = tier in routing.get("free_tiers", [])
-    if sticky in paid:
-        paid.remove(sticky)
-        paid.insert(0, sticky)
-    elif sticky in free and free_first:
-        free.remove(sticky)
-        free.insert(0, sticky)
-    return free + paid if free_first else paid + free
+def lineup(cfg: dict, sticky: str | None = None, usage: dict | None = None) -> list[str]:
+    providers = sorted(cfg["providers"], key=lambda p: (usage or {}).get(p, 0))
+    if sticky in providers:
+        providers.remove(sticky)
+        providers.insert(0, sticky)
+    return providers
 
 
 class Printer:
@@ -549,7 +465,7 @@ class Chat:
     def order(self, tier: str) -> list[str]:
         if self.pinned_provider:
             return [self.pinned_provider]
-        return lineup(self.cfg, tier, self.provider, usage_today())
+        return lineup(self.cfg, self.provider, usage_today())
 
     def _started(self, proc):
         self._proc = proc

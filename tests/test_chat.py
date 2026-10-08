@@ -220,7 +220,7 @@ def test_model_by_exact_or_partial_name():
 def test_ambiguous_or_unknown_name_changes_nothing():
     c = catalog_chat()
     c.command("/model sol")
-    c.command("/model gemini")
+    c.command("/model mistral")
     assert c.pinned_model is None
 
 
@@ -496,14 +496,6 @@ def test_loop_stops_after_max_rounds_with_last_version():
     assert any("belum lolos setelah 2 review" in i for i in ui.infos)
 
 
-def test_provider_without_reviewer_still_shows_answer():
-    run, calls = showing_runner([(0, [{"type": "message", "role": "assistant", "content": "jawaban gemini"}])])
-    ui = RecordUI()
-    c = Chat({**LOOP_CFG, "providers": ["gemini"]}, provider="gemini", tier="heavy", use_llm=False, ui=ui)
-    assert c.send("rancang arsitektur", runner=run) == 0
-    assert len(calls) == 1 and [t for k, t in ui.shown if k == "text"] == ["jawaban gemini"]
-
-
 def test_loop_stops_when_quota_is_low():
     config.save_quota("claude", {"5h": {"used": 90, "resets": None}})
     run, calls = fake_runner([(0, claude_reply("jawaban"))])
@@ -525,7 +517,7 @@ def test_review_only_for_listed_families_at_or_above_version():
     due = [m for m in ("gpt-6-astra", "gpt-6.1-astra", "gpt-7-astra", "gpt-5.6-astra", "gpt-6.1-sol", "gpt-6-sol")
            if review_due(LOOP_CFG, "codex", m)]
     assert due == ["gpt-6-astra", "gpt-6.1-astra", "gpt-7-astra"]
-    assert not review_due(LOOP_CFG, "gemini", "gemini-3.8-flash") and not review_due(CFG, "claude", "fable")
+    assert not review_due(LOOP_CFG, "other", "fable") and not review_due(CFG, "claude", "fable")
 
 
 def test_pinned_high_model_is_reviewed_in_any_tier():

@@ -1,8 +1,7 @@
 providers = ["claude", "codex"]
 
 [routing]
-# Free providers go first for these tiers; heavy goes to the paid ones, which take turns by today's use.
-free = []
+# Cheap tiers for the classifier limits below; a prompt that needed any other tier must not land here.
 free_tiers = ["light", "medium"]
 
 [classifier]
@@ -36,8 +35,8 @@ min_tier = "light"
 # Extra folders every provider may read and write in chat, on top of the current one.
 dirs = ["D:/DOCUMENT/02_Main"]
 
-# Shown by /models and Ctrl+O, listed first. Codex adds `codex debug models` and Gemini adds the models
-# its API key can call. Copilot and Claude Code have no way to list models, so their lists are kept here.
+# Shown by /models and Ctrl+O, listed first. Codex adds `codex debug models`; Claude Code has no way to list
+# models, so its list is kept here.
 [models]
 claude = [
     "haiku", "sonnet", "opus",
@@ -45,20 +44,14 @@ claude = [
 ]
 
 [tiers.light]
-gemini = { model = "gemini-3.8-flash", effort = "low" }
-copilot = { model = "auto", effort = "low" }
 claude = { model = "haiku", effort = "low" }
 codex = { model = "gpt-5.6-luna", effort = "low" }
 
 [tiers.medium]
-gemini = { model = "gemini-3.8-flash", effort = "medium" }
-copilot = { model = "auto", effort = "medium" }
 claude = { model = "sonnet", effort = "medium" }
 codex = { model = "gpt-5.6-terra", effort = "medium" }
 
 [tiers.heavy]
-gemini = { model = "gemini-3.8-flash", effort = "high" }
-copilot = { model = "auto", effort = "high" }
 claude = { model = "opus", effort = "high" }
 codex = { model = "gpt-6.1-sol", effort = "high" }
 

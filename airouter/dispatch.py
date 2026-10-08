@@ -1,5 +1,4 @@
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -44,49 +43,6 @@ def codex_cmd() -> list[str]:
     return _node_script("codex", "@openai", "codex", "bin", "codex.js")
 
 
-def gemini_cmd() -> list[str]:
-    return _node_script("gemini", "@google", "gemini-cli", "bundle", "gemini.js")
-
-
-def copilot_cmd() -> list[str]:
-    return _node_script("copilot", "@github", "copilot", "npm-loader.js")
-
-
-COPILOT_DENY = [
-    "shell(git push)", "shell(git commit)", "shell(git reset)", "shell(git clean)", "shell(git checkout)",
-    "shell(gh repo)", "shell(gh pr)", "shell(npm publish)", "shell(rm)", "shell(rmdir)", "shell(del)",
-    "shell(rd)", "shell(Remove-Item)", "shell(format)",
-]
-
-
-def _deny(rules: list[str]) -> list[str]:
-    return [arg for rule in rules for arg in ("--deny-tool", rule)]
-
-
-def _copilot_model(model: str, effort: str) -> list[str]:
-    if model == "auto":
-        return ["--model", "auto"]
-    return ["--model", model, "--reasoning-effort", effort]
-
-
-def load_user_env(*names: str):
-    if sys.platform != "win32":
-        return
-    import winreg
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment")
-    except OSError:
-        return
-    with key:
-        for name in names:
-            if os.environ.get(name):
-                continue
-            try:
-                os.environ[name] = str(winreg.QueryValueEx(key, name)[0])
-            except OSError:
-                pass
-
-
 def build(provider: str, model: str, effort: str, prompt: str, interactive: bool) -> tuple[list[str], str | None]:
     if provider == "claude":
         base = claude_cmd() + ["--model", model, "--effort", effort]
@@ -99,15 +55,6 @@ def build(provider: str, model: str, effort: str, prompt: str, interactive: bool
             return codex_cmd() + ["-m", model] + effort_cfg + ([prompt] if prompt else []), None
         return codex_cmd() + ["exec", "-m", model] + effort_cfg + [
             "--skip-git-repo-check", "--ephemeral", "-s", "read-only", "-"], prompt
-    if provider == "gemini":
-        if interactive:
-            return gemini_cmd() + ["-m", model] + (["-i", prompt] if prompt else []), None
-        return gemini_cmd() + ["-p", " ", "-m", model, "--approval-mode", "plan", "--skip-trust"], prompt
-    if provider == "copilot":
-        base = copilot_cmd() + _copilot_model(model, effort)
-        if interactive:
-            return base + (["-i", prompt] if prompt else []), None
-        return base + ["-s", "--allow-all-tools", "--no-ask-user"] + _deny(["shell", "write"]), prompt
     raise ValueError(f"unknown provider: {provider}")
 
 
@@ -143,18 +90,6 @@ def chat_cmd(provider: str, model: str, effort: str, session: str | None, files=
         if session:
             return codex_cmd() + ["exec", "resume"] + common + ["-c", 'sandbox_mode="workspace-write"', session, "-"]
         return codex_cmd() + ["exec"] + common + ["-s", "workspace-write", "-"]
-    if provider == "gemini":
-        cmd = gemini_cmd() + ["-p", " ", "-m", model, "-o", "stream-json", "--approval-mode", "auto_edit",
-                              "--skip-trust"]
-        cmd += [arg for root in chat_roots(attach_dir) for arg in ("--include-directories", root)]
-        return cmd + (["--resume", session] if session else [])
-    if provider == "copilot":
-        cmd = copilot_cmd() + _copilot_model(model, effort) + [
-            "--output-format", "json", "--allow-all-tools", "--no-ask-user"] + _deny(COPILOT_DENY)
-        cmd += [arg for f in files for arg in ("--attachment", str(f))
-                if attach.is_image(Path(f)) or Path(f).suffix.lower() == ".pdf"]
-        cmd += [arg for root in chat_roots(attach_dir) for arg in ("--add-dir", root)]
-        return cmd + (["--session-id", session] if session else [])
     raise ValueError(f"unknown provider: {provider}")
 
 
@@ -191,39 +126,35 @@ BATCH_PROMPT = (
 )
 
 
-def llm_classify_batch(prompts: list[str], model: str) -> list[str | None]:
+def _ask_claude(system: str, text: str, model: str, effort: str, timeout: int) -> str | None:
     cmd = claude_cmd() + [
-        "-p", "--model", model, "--effort", "low", "--tools", "",
+        "-p", "--model", model, "--effort", effort, "--tools", "",
         "--no-session-persistence", "--strict-mcp-config",
-        "--output-format", "json", "--system-prompt", BATCH_PROMPT,
+        "--output-format", "json", "--system-prompt", system,
     ]
     try:
-        out = subprocess.run(cmd, input=json.dumps(prompts, ensure_ascii=False).encode("utf-8"),
-                             capture_output=True, timeout=300)
+        out = subprocess.run(cmd, input=text.encode("utf-8"), capture_output=True, timeout=timeout)
         data = json.loads(out.stdout.decode("utf-8", "replace"))
-        text = str(data.get("result", ""))
-        tiers = json.loads(text[text.index("["):text.rindex("]") + 1])
     except (OSError, subprocess.TimeoutExpired, ValueError):
-        return [None] * len(prompts)
-    if data.get("is_error") or len(tiers) != len(prompts):
+        return None
+    if data.get("is_error"):
+        return None
+    return str(data.get("result", ""))
+
+
+def llm_classify_batch(prompts: list[str], model: str) -> list[str | None]:
+    text = _ask_claude(BATCH_PROMPT, json.dumps(prompts, ensure_ascii=False), model, "low", 300)
+    try:
+        tiers = json.loads(text[text.index("["):text.rindex("]") + 1]) if text else []
+    except ValueError:
+        tiers = []
+    if len(tiers) != len(prompts):
         return [None] * len(prompts)
     return [t.strip().lower() if isinstance(t, str) else None for t in tiers]
 
 
 def llm_classify(prompt: str, model: str) -> str | None:
-    cmd = claude_cmd() + [
-        "-p", "--model", model, "--effort", "low", "--tools", "",
-        "--no-session-persistence", "--strict-mcp-config",
-        "--output-format", "json", "--system-prompt", CLASSIFIER_PROMPT,
-    ]
-    try:
-        out = subprocess.run(cmd, input=prompt.encode("utf-8"), capture_output=True, timeout=60)
-        data = json.loads(out.stdout.decode("utf-8", "replace"))
-    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
-        return None
-    if data.get("is_error"):
-        return None
-    answer = str(data.get("result", "")).strip().lower()
+    answer = (_ask_claude(CLASSIFIER_PROMPT, prompt, model, "low", 60) or "").strip().lower()
     for tier in ("light", "medium", "heavy"):
         if tier in answer:
             return tier
@@ -231,47 +162,7 @@ def llm_classify(prompt: str, model: str) -> str | None:
 
 
 def llm_text(system: str, text: str, model: str, timeout: int = 300) -> str | None:
-    cmd = claude_cmd() + [
-        "-p", "--model", model, "--effort", "medium", "--tools", "",
-        "--no-session-persistence", "--strict-mcp-config",
-        "--output-format", "json", "--system-prompt", system,
-    ]
-    try:
-        out = subprocess.run(cmd, input=text.encode("utf-8"), capture_output=True, timeout=timeout)
-        data = json.loads(out.stdout.decode("utf-8", "replace"))
-    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
-        return None
-    if data.get("is_error"):
-        return None
-    return str(data.get("result", "")).strip() or None
-
-
-GEMINI_SKIP = ("tts", "image", "robotics", "computer-use", "transcribe", "customtools", "embedding", "-pro")
-
-
-def gemini_models() -> list[str]:
-    import urllib.request
-    load_user_env("GEMINI_API_KEY")
-    key = os.environ.get("GEMINI_API_KEY")
-    if not key:
-        return []
-    req = urllib.request.Request("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200",
-                                 headers={"x-goog-api-key": key})
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except (OSError, ValueError):
-        return []
-    names = []
-    for m in data.get("models", []):
-        name = m.get("name", "").removeprefix("models/")
-        if (name.startswith("gemini-") and "generateContent" in m.get("supportedGenerationMethods", [])
-                and not any(s in name for s in GEMINI_SKIP)):
-            names.append(name)
-    return names
-
-
-DISCOVER = {"codex": lambda: codex_models(), "gemini": lambda: gemini_models()}
+    return (_ask_claude(system, text, model, "medium", timeout) or "").strip() or None
 
 
 def codex_models() -> list[str]:
@@ -281,3 +172,6 @@ def codex_models() -> list[str]:
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
         return []
     return [m["slug"] for m in data.get("models", []) if m.get("visibility") == "list" and m.get("slug")]
+
+
+DISCOVER = {"codex": codex_models}

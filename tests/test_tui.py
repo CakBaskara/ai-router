@@ -180,14 +180,13 @@ def test_picker_shows_provider_folders_in_order():
 
     async def go():
         app = make_app()
-        app.chat._catalog = [("claude", "opus"), ("codex", "gpt-6.1-sol"), ("gemini", "gemini-3.8-flash"),
-                             ("copilot", "auto")]
+        app.chat._catalog = [("claude", "opus"), ("codex", "gpt-6.1-sol")]
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.press("ctrl+o")
             await pilot.pause()
             tree = app.screen.query_one(Tree)
             names = [str(n.label).split()[0] for n in tree.root.children[1:]]
-            assert names == ["Gemini", "Copilot", "Codex", "Claude"]
+            assert names == ["Codex", "Claude"]
             assert not any(n.is_expanded for n in tree.root.children[1:])
     asyncio.run(go())
 
@@ -197,12 +196,12 @@ def test_picker_opens_folder_then_picks_model_with_keys():
 
     async def go():
         app = make_app()
-        app.chat._catalog = [("gemini", "gemini-3.8-flash"), ("codex", "gpt-6.1-sol"), ("codex", "gpt-5.5")]
+        app.chat._catalog = [("claude", "opus"), ("codex", "gpt-6.1-sol"), ("codex", "gpt-5.5")]
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.press("ctrl+o")
             await pilot.pause()
             tree = app.screen.query_one(Tree)
-            await pilot.press("down", "down")
+            await pilot.press("down")
             assert "Codex" in str(tree.cursor_node.label)
             await pilot.press("enter")
             await pilot.pause()

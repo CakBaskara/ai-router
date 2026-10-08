@@ -105,30 +105,3 @@ def quota_line(data: dict | None = None, now: float | None = None) -> str:
         if left:
             parts.append(f"{provider} " + " · ".join(left))
     return "  │  ".join(parts)
-
-
-RULES_HEADER = "<!-- Copied from ~/.claude/CLAUDE.md by `ai`. Edit that file instead; this copy is overwritten. -->\n\n"
-
-
-def rules_source() -> Path:
-    return Path.home() / ".claude" / "CLAUDE.md"
-
-
-def rules_targets() -> list[Path]:
-    home = Path.home()
-    return [home / ".gemini" / "GEMINI.md", home / ".copilot" / "copilot-instructions.md"]
-
-
-def sync_rules() -> list[Path]:
-    src = rules_source()
-    if not src.exists():
-        return []
-    text = RULES_HEADER + src.read_text(encoding="utf-8-sig")
-    changed = []
-    for target in rules_targets():
-        if target.exists() and target.read_text(encoding="utf-8-sig") == text:
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-        changed.append(target)
-    return changed

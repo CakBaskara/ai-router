@@ -45,11 +45,6 @@ def test_claude_gets_image_block(tmp_path):
     assert len(blocks) == 1 and blocks[0]["source"]["media_type"] == "image/png"
 
 
-def test_gemini_gets_at_reference_with_forward_slashes(tmp_path):
-    f = png(tmp_path / "a.png")
-    assert with_files("gemini", "lihat", [f]).endswith("@" + str(f).replace("\\", "/"))
-
-
 def test_other_providers_get_file_list(tmp_path):
     f = png(tmp_path / "a.png")
     assert str(f) in with_files("codex", "lihat", [f])
@@ -60,22 +55,16 @@ def test_cmd_flags_per_provider(tmp_path):
     txt.write_text("x")
     codex = dispatch.chat_cmd("codex", "m", "low", None, [img, txt], "D:/att")
     assert codex[codex.index("-i") + 1] == str(img) and codex.count("-i") == 1
-    copilot = dispatch.chat_cmd("copilot", "auto", "low", None, [img, txt], "D:/att")
-    assert copilot.count("--attachment") == 1 and "--add-dir" in copilot
-    gemini = dispatch.chat_cmd("gemini", "g", "low", None, [img], "D:/att")
-    assert str(Path("D:/att").resolve()) in gemini
     claude = dispatch.chat_cmd("claude", "opus", "high", None, attach_dir="D:/att")
     assert str(Path("D:/att").resolve()) in claude
 
 
 def test_every_provider_gets_the_same_roots(monkeypatch):
     monkeypatch.setattr(dispatch.config, "load", lambda: {"chat": {"dirs": ["D:/extra"]}})
-    flags = {"claude": "--add-dir", "copilot": "--add-dir", "gemini": "--include-directories"}
     want = dispatch.chat_roots("D:/att")
     assert str(Path("D:/extra").resolve()) in want
-    for provider, flag in flags.items():
-        cmd = dispatch.chat_cmd(provider, "m", "low", None, attach_dir="D:/att")
-        assert [cmd[i + 1] for i, a in enumerate(cmd) if a == flag] == want
+    claude = dispatch.chat_cmd("claude", "m", "low", None, attach_dir="D:/att")
+    assert [claude[i + 1] for i, a in enumerate(claude) if a == "--add-dir"] == want
     codex = dispatch.chat_cmd("codex", "m", "low", None, attach_dir="D:/att")
     assert json.dumps(want) in " ".join(codex)
 

@@ -18,7 +18,7 @@ from textual.widgets import Button, Markdown, Static, TextArea, Tree
 from . import attach, codex, config, learn
 from .chat import HELP, Chat
 
-PICKER_ORDER = ("gemini", "copilot", "codex", "claude")
+PICKER_ORDER = ("codex", "claude")
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 PACKAGE = Path(__file__).parent
 MODULES = ("config", "attach", "dispatch", "learn", "codex", "chat", "tui")
@@ -340,10 +340,8 @@ class ModelPicker(ModalScreen):
         Binding("end", "last", show=False, priority=True),
     ]
 
-    def __init__(self, catalog: list[tuple[str, str]], current: str, auto: bool, free: list[str] = (),
-                 provider: str | None = None):
+    def __init__(self, catalog: list[tuple[str, str]], current: str, auto: bool, provider: str | None = None):
         super().__init__()
-        self.free = list(free)
         self.catalog = catalog
         self.current = current
         self.auto = auto
@@ -358,10 +356,9 @@ class ModelPicker(ModalScreen):
         present = list(dict.fromkeys(p for p, _ in self.catalog))
         for provider in [p for p in PICKER_ORDER if p in present] + [p for p in present if p not in PICKER_ORDER]:
             models = [(i, m) for i, (p, m) in enumerate(self.catalog) if p == provider]
-            kind = "gratis" if provider in self.free else "berbayar"
             mine = not self.auto and provider == self.provider
             folder = tree.root.add(Text.assemble((provider.capitalize(), "bold"),
-                                                 (f"  {kind} · {len(models)} model", "dim")),
+                                                 (f"  {len(models)} model", "dim")),
                                    expand=mine)
             folder.add_leaf(Text.assemble(("● " if mine and self.current == provider else "  "),
                                           ("otomatis", "italic"), ("  model dipilih router", "dim")),
@@ -833,10 +830,9 @@ class ChatApp(App):
             return
         c = self.chat
         auto = not (c.pinned_model or c.pinned_provider)
-        free = c.cfg.get("routing", {}).get("free", [])
         provider = c.pinned_provider or c.provider
         current = c.pinned_model or (provider if c.pinned_provider and not c.pinned_model else c.label())
-        self.push_screen(ModelPicker(c.catalog(), current, auto, free, provider), self.picked)
+        self.push_screen(ModelPicker(c.catalog(), current, auto, provider), self.picked)
 
     def picked(self, choice):
         if choice == "auto":

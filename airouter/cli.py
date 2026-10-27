@@ -71,6 +71,10 @@ def style_report(data: dict) -> str:
 def main(argv=None) -> int:
     for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(encoding="utf-8")
+    os.environ["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"] = "1"
+    if sys.platform == "win32":
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleTitleW("AI-Router")
     args = _parse(argv if argv is not None else sys.argv[1:])
     cfg = config.load()
 

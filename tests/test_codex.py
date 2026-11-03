@@ -253,20 +253,21 @@ def test_codex_ui_injects_without_queue_and_updates_model_label(server):
     asyncio.run(go())
 
 
-def test_codex_and_claude_receive_router_root(monkeypatch):
-    monkeypatch.setattr(dispatch.attach, "folder", lambda: config.REPO_ROOT / "attachments")
+def test_codex_and_claude_do_not_receive_router_root(monkeypatch, tmp_path):
+    monkeypatch.setattr(dispatch.attach, "folder", lambda: tmp_path / "attachments")
+    monkeypatch.setattr(dispatch.config, "load", lambda: {"chat": {"dirs": []}})
     root = str(config.REPO_ROOT.resolve())
     for provider in ("codex", "claude"):
         for session in (None, "saved"):
             command = dispatch.chat_cmd(provider, "model-a", "low", session)
             if provider == "claude":
-                assert root in command
+                assert root not in command
             else:
                 setting = next(arg for arg in command if arg.startswith("sandbox_workspace_write.writable_roots="))
-                assert root in json.loads(setting.split("=", 1)[1])
+                assert root not in json.loads(setting.split("=", 1)[1])
     setting = next(arg for arg in dispatch.codex_server_cmd()
                    if arg.startswith("sandbox_workspace_write.writable_roots="))
-    assert root in json.loads(setting.split("=", 1)[1])
+    assert root not in json.loads(setting.split("=", 1)[1])
 
 
 def test_short_tier_adjustment_uses_current_provider_only():

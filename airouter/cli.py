@@ -6,7 +6,7 @@ import sys
 import time
 from datetime import datetime
 
-from . import chat, config, dispatch, learn
+from . import chat, config, dispatch, learn, paths
 from .config import log, say, usage_today
 from .learn import TIERS, classify
 
@@ -26,7 +26,18 @@ def _parse(argv):
     p.add_argument("--ml-auto", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--style", action="store_true", help="show how long and padded the chat answers are, per provider")
     p.add_argument("--quota", action="store_true", help="show the Claude and Codex usage left in the 5-hour and weekly windows")
-    return p.parse_args(argv)
+    p.add_argument("--migrate-data", action="store_true", help="preview migration of legacy runtime data")
+    p.add_argument("--migrate-from", type=str, help="legacy logs directory (requires --migrate-data)")
+    p.add_argument("--apply", action="store_true", help="copy data after previewing --migrate-data; never overwrite")
+    args = p.parse_args(argv)
+    if (args.apply or args.migrate_from) and not args.migrate_data:
+        p.error("--apply and --migrate-from require --migrate-data")
+    if args.apply and args.dry_run:
+        p.error("--apply cannot be combined with --dry-run")
+    if args.migrate_data and (args.prompt or args.interactive or args.quota or args.style or args.ml
+                              or args.ml_train or args.ml_auto):
+        p.error("--migrate-data cannot be combined with another action")
+    return args
 
 
 def _clock(ts) -> str:
@@ -70,12 +81,28 @@ def style_report(data: dict) -> str:
 
 def main(argv=None) -> int:
     for stream in (sys.stdout, sys.stderr):
-        stream.reconfigure(encoding="utf-8")
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     os.environ["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"] = "1"
     if sys.platform == "win32":
         import ctypes
         ctypes.windll.kernel32.SetConsoleTitleW("AI-Router")
     args = _parse(argv if argv is not None else sys.argv[1:])
+    if args.migrate_data:
+        from pathlib import Path
+        entries = paths.migrate_data(Path(args.migrate_from) if args.migrate_from else None, apply=args.apply)
+        print("Migrasi data" if args.apply else "Rencana migrasi (tanpa menulis file)")
+        for entry in entries:
+            detail = f" ({entry.detail})" if entry.detail else ""
+            print(f"{entry.status}: {entry.source} -> {entry.target}{detail}")
+        failed = any(entry.status in {"conflict", "error"} for entry in entries)
+        if not args.apply:
+            print("Hentikan semua sesi ai, lalu jalankan lagi dengan --apply untuk menyalin.")
+        elif failed:
+            print("Migrasi belum selesai. Selesaikan konflik/error lalu ulangi; file sumber tetap ada.")
+        else:
+            print("Migrasi selesai. File sumber tetap ada sebagai cadangan.")
+        return 1 if failed else 0
     cfg = config.load()
 
     if args.quota:

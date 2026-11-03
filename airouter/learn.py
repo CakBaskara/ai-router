@@ -11,7 +11,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import config, dispatch
+from . import config, dispatch, paths
 
 TIERS = ("light", "medium", "heavy")
 
@@ -87,7 +87,7 @@ _vectors = {}
 
 
 def model_folder() -> Path:
-    return Path(os.environ.get("AI_ROUTER_MODELS", config.REPO_ROOT / "logs" / "models")) / MODEL_REPO.split("/")[1]
+    return paths.model_dir() / MODEL_REPO.split("/")[1]
 
 
 def model_present() -> bool:
@@ -215,7 +215,7 @@ _trained = {}
 
 
 def labels_path() -> Path:
-    return Path(os.environ.get("AI_ROUTER_LABELS", config.REPO_ROOT / "logs" / "labels.jsonl"))
+    return Path(os.environ.get("AI_ROUTER_LABELS", paths.log_dir() / "labels.jsonl"))
 
 
 def settings_path() -> Path:

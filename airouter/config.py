@@ -7,17 +7,40 @@ from collections import Counter
 from datetime import date
 from pathlib import Path
 
+from . import paths
+
 PACKAGE_CONFIG = Path(__file__).with_name("config.toml")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def config_path() -> Path:
+    if "AI_ROUTER_CONFIG" in os.environ:
+        return Path(os.environ["AI_ROUTER_CONFIG"])
+    user = paths.config_dir() / "config.toml"
+    return user if user.exists() else PACKAGE_CONFIG
+
+
+def _merge(defaults: dict, overrides: dict) -> dict:
+    merged = dict(defaults)
+    for key, value in overrides.items():
+        if isinstance(merged.get(key), dict):
+            if not isinstance(value, dict):
+                raise ValueError(f"config {key} must be a table")
+            value = _merge(merged[key], value)
+        merged[key] = value
+    return merged
+
+
 def load() -> dict:
-    path = Path(os.environ.get("AI_ROUTER_CONFIG", PACKAGE_CONFIG))
-    return tomllib.loads(path.read_text(encoding="utf-8-sig"))
+    defaults = tomllib.loads(PACKAGE_CONFIG.read_text(encoding="utf-8-sig"))
+    selected = config_path()
+    if selected == PACKAGE_CONFIG:
+        return defaults
+    return _merge(defaults, tomllib.loads(selected.read_text(encoding="utf-8-sig")))
 
 
 def log_path() -> Path:
-    return Path(os.environ.get("AI_ROUTER_LOG", REPO_ROOT / "logs" / "routes.jsonl"))
+    return Path(os.environ.get("AI_ROUTER_LOG", paths.log_dir() / "routes.jsonl"))
 
 
 def say(msg: str):

@@ -62,8 +62,7 @@ def build(provider: str, model: str, effort: str, prompt: str, interactive: bool
 
 
 def chat_roots(attach_dir=None):
-    roots = [str(config.REPO_ROOT.resolve())]
-    roots += [str(Path(d).expanduser().resolve()) for d in config.load().get("chat", {}).get("dirs", [])]
+    roots = [str(Path(d).expanduser().resolve()) for d in config.load().get("chat", {}).get("dirs", [])]
     if attach_dir:
         roots.append(str(Path(attach_dir).resolve()))
     return list(dict.fromkeys(roots))

@@ -9,7 +9,7 @@ description = "Route each prompt to the cheapest Claude Code or Codex model that
 requires-python = ">=3.11"
 license = { text = "MIT" }
 readme = "README.md"
-dependencies = ["textual>=8", "pillow>=10", "numpy>=1.26", "onnxruntime>=1.18", "tokenizers>=0.19"]
+dependencies = ["textual>=8", "pillow>=10", "numpy>=1.26", "onnxruntime>=1.18", "tokenizers>=0.19", "platformdirs>=4"]
 
 [project.scripts]
 ai = "airouter.cli:main"
@@ -19,3 +19,6 @@ packages = ["airouter"]
 
 [tool.setuptools.package-data]
 airouter = ["config.toml", "seed_labels.jsonl"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

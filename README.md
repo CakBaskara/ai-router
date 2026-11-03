@@ -39,6 +39,7 @@ py -m pip install -e .
 | `ai --ml` | See how the router's model is doing |
 | `ai --style` | How long and padded the chat answers are, per provider |
 | `ai --quota` | Claude and Codex usage left in the 5-hour and weekly windows |
+| `ai --migrate-data` | Preview copying runtime data from the old installation |
 
 In the chat, Enter sends, Shift+Enter adds a line, Esc or ■ stops an answer, and Ctrl+O picks a
 model. Alt+V pastes a screenshot, and 📎 attaches a file. A pasted or dragged file path stays
@@ -72,7 +73,7 @@ scored for padding (praise openers, "semoga membantu" closers, restating the que
 short questions) and for how you react next ("singkat aja", "maksudnya?", or stopping it with Esc).
 After 30 answers, Sonnet rewrites the note from the worst ones. The new note is tried on the next 30
 answers and kept only if it scores better; otherwise the old one comes back. The note lives in
-`logs/style.md`, and you can edit it yourself. `ai --style` shows the scores.
+`style.md` in the runtime logs directory, and you can edit it yourself. `ai --style` shows the scores.
 
 ## Good to know
 
@@ -82,9 +83,63 @@ answers and kept only if it scores better; otherwise the old one comes back. The
   Restart `ai` after updating to enable this dialog; console-only clients decline these requests.
 - Messages sent while Claude or Codex is replying join the active work. A message arriving
   after the turn has ended starts a follow-up reply. Model-switch commands take effect between turns.
-- Claude and Codex chat sessions include the current project and the ai-router installation folder as writable
-  locations. Restart a session to pick up changes to its directory permissions.
-- Settings live in `airouter/config.toml`. Every route is logged to `logs/routes.jsonl`.
+- Claude and Codex chat sessions use the current project, explicitly configured `chat.dirs`, and attachment
+  storage. The ai-router installation folder is no longer added automatically. The bundled `chat.dirs` is empty;
+  a migrated configuration keeps its existing directories. Restart sessions to pick up changes to permissions.
+- Settings use the bundled `airouter/config.toml` as defaults, with user settings overlaid as described below.
+
+## Runtime data and configuration
+
+Runtime data is stored outside the installed package. On Windows the defaults are:
+
+| Files | Location |
+|---|---|
+| User configuration | `%APPDATA%\AI-Router\config.toml` |
+| Routes, labels, quota, reply style and learning state | `%LOCALAPPDATA%\AI-Router\logs\` |
+| Attachments | `%LOCALAPPDATA%\AI-Router\attachments\` |
+| Downloaded embedding models | `%LOCALAPPDATA%\AI-Router\models\` |
+
+Linux and macOS use the corresponding per-user configuration and data directories from `platformdirs`.
+Paths are only created when writing. Bundled configuration and seed labels remain package assets.
+
+Configuration selection is `AI_ROUTER_CONFIG`, if set, then the user configuration, if present, then the
+bundled defaults. Missing keys in the selected configuration inherit bundled defaults; arrays replace the
+default array. An explicit missing or invalid configuration reports an error instead of silently falling back.
+The TUI watches both the defaults and user configuration for changes.
+
+| Environment variable | Overrides |
+|---|---|
+| `AI_ROUTER_CONFIG` | Selected configuration file |
+| `AI_ROUTER_DATA_DIR` | Runtime data root, including logs, attachments and models |
+| `AI_ROUTER_LOG` | Routes file; quota, replies and style remain beside this file |
+| `AI_ROUTER_LABELS` | Labels file; learning settings, vectors, thresholds and audit remain beside this file |
+| `AI_ROUTER_ATTACH` | Attachment directory |
+| `AI_ROUTER_MODELS` | Models directory; each model retains its own subdirectory |
+
+Set `AI_ROUTER_DATA_DIR` before migration or starting `ai` to keep large runtime files on another drive.
+Individual path overrides take priority over this root. The selected overrides must also be present in future
+sessions. This change does not move provider-owned Claude or Codex session storage.
+
+Stop running `ai` sessions before migrating. Preview first:
+
+```powershell
+ai --migrate-data
+```
+
+For a different old checkout, pass its logs directory with `--migrate-from "path\to\old\ai-router\logs"`.
+The preview lists every source and destination without creating directories or writing data. It includes the
+old sibling `airouter/config.toml` as user configuration unless `AI_ROUTER_CONFIG` already selects a file.
+After reviewing the destinations, use the same options plus `--apply`:
+
+```powershell
+ai --migrate-data --apply
+```
+
+Migration copies files and preserves originals as a backup. It never overwrites a destination: identical
+files are left alone, and differing files are reported as conflicts. Conflicts or inspection errors prevent
+copying from starting. If copying fails partway through, completed files remain; resolve the error and rerun
+the command. Repeating a completed migration does not change files. Locks, partial downloads, symlinks and
+Windows reparse points are skipped. Resolve conflicts manually; source files are never deleted automatically.
 
 ## License
 

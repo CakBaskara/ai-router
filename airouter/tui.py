@@ -21,15 +21,16 @@ from .chat import HELP, Chat
 PICKER_ORDER = ("codex", "claude")
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 PACKAGE = Path(__file__).parent
-MODULES = ("config", "attach", "dispatch", "learn", "codex", "chat", "tui")
+MODULES = ("paths", "config", "attach", "dispatch", "learn", "codex", "chat", "tui")
 
 
 def _watched() -> list[Path]:
-    return sorted(PACKAGE.glob("*.py")) + [Path(os.environ.get("AI_ROUTER_CONFIG", config.PACKAGE_CONFIG))]
+    return sorted(PACKAGE.glob("*.py")) + list(dict.fromkeys([
+        config.PACKAGE_CONFIG, config.paths.config_dir() / "config.toml", config.config_path()]))
 
 
 def _stamp() -> tuple:
-    return tuple((p.name, p.stat().st_mtime_ns) for p in _watched() if p.exists())
+    return tuple((str(p), p.stat().st_mtime_ns) for p in _watched() if p.exists())
 
 
 def _broken() -> str | None:

@@ -33,7 +33,7 @@ min_quota = 20
 [chat]
 min_tier = "light"
 # Extra folders every provider may read and write in chat, on top of the current one.
-dirs = ["D:/DOCUMENT/02_Main"]
+dirs = []
 
 # Shown by /models and Ctrl+O, listed first. Codex adds `codex debug models`; Claude Code has no way to list
 # models, so its list is kept here.

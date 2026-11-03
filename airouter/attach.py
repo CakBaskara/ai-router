@@ -4,7 +4,7 @@ import shutil
 import time
 from pathlib import Path
 
-from . import config
+from . import paths
 
 MEDIA = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
 CONVERT = {".bmp", ".tif", ".tiff"}
@@ -12,9 +12,7 @@ MAX_BYTES = 20 * 1024 * 1024
 
 
 def folder() -> Path:
-    path = Path(os.environ.get("AI_ROUTER_ATTACH", config.REPO_ROOT / "logs" / "attachments"))
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return paths.attachment_dir()
 
 
 def is_image(path: Path) -> bool:
@@ -27,7 +25,9 @@ def media_type(path: Path) -> str:
 
 def _target(name: str) -> Path:
     safe = re.sub(r"[^\w.-]+", "_", name).strip("_") or "file"
-    return folder() / f"{time.strftime('%Y%m%d-%H%M%S')}-{safe}"
+    directory = folder()
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"{time.strftime('%Y%m%d-%H%M%S')}-{safe}"
 
 
 def store(src: Path) -> Path:

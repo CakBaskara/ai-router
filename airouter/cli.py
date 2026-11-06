@@ -106,6 +106,7 @@ def main(argv=None) -> int:
     cfg = config.load()
 
     if args.quota:
+        config.save_quota("claude", config.claude_usage_windows(dispatch.read_claude_usage()))
         config.save_quota("codex", config.codex_windows(dispatch.read_limits()))
         print(quota_report(config.load_quota()))
         return 0

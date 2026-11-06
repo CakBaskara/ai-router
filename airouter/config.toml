@@ -34,6 +34,9 @@ min_quota = 20
 min_tier = "light"
 # Extra folders every provider may read and write in chat, on top of the current one.
 dirs = []
+# false: show a loading line while the model works and only its final answer when it is done;
+# true: stream tool calls and text as they happen.
+show_work = false
 
 # Shown by /models and Ctrl+O, listed first. Codex adds `codex debug models`; Claude Code has no way to list
 # models, so its list is kept here.

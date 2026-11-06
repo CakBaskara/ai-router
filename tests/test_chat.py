@@ -648,3 +648,51 @@ def test_empty_answer_falls_back_to_next_provider():
     c.pinned_tier = "light"
     assert c.send("halo", runner=runner) == 0
     assert len(calls) == 2 and c.provider == "codex" and c.transcript[-1] == ("Assistant", "ok")
+
+
+def test_final_is_the_text_after_the_last_tool():
+    turn = ClaudeTurn()
+    for ev in [
+        {"type": "stream_event", "event": {"type": "content_block_delta",
+                                           "delta": {"type": "text_delta", "text": "Saya cek."}}},
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {}}]}},
+        {"type": "stream_event", "event": {"type": "message_start", "message": {}}},
+        {"type": "stream_event", "event": {"type": "content_block_delta",
+                                           "delta": {"type": "text_delta", "text": "Ya, "}}},
+        {"type": "stream_event", "event": {"type": "content_block_delta",
+                                           "delta": {"type": "text_delta", "text": "sudah."}}},
+    ]:
+        turn.feed(ev)
+    assert turn.final() == "Ya, sudah."
+    codex = CodexTurn()
+    codex.feed({"type": "item.delta", "item": {"type": "agent_message", "id": "a", "text": "Cek dulu."}})
+    codex.feed({"type": "item.started", "item": {"type": "command_execution", "command": "ls"}})
+    codex.feed({"type": "item.delta", "item": {"type": "agent_message", "id": "b", "text": "Selesai."}})
+    assert codex.final() == "Selesai."
+    assert ClaudeTurn().final() == ""
+
+
+def test_pinned_effort_fits_each_provider(monkeypatch):
+    monkeypatch.setattr(dispatch, "CODEX_EFFORTS", {})
+    c = chat()
+    c.command("/effort ultra")
+    assert c.pinned_effort == "ultra"
+    assert c.route_for("light", "claude")["effort"] == "max"
+    assert c.route_for("light", "codex")["effort"] == "xhigh"
+    dispatch.CODEX_EFFORTS["gpt-5.6-luna"] = ["low", "medium", "high", "xhigh", "max", "ultra"]
+    assert c.route_for("light", "codex")["effort"] == "ultra"
+    c.command("/effort minimal")
+    assert c.route_for("heavy", "claude") == {"model": "opus", "effort": "low"}
+    c.command("/effort auto")
+    assert c.pinned_effort is None and c.route_for("heavy", "claude")["effort"] == "high"
+    assert "pinned_effort" in c.snapshot()
+
+
+def test_claude_usage_endpoint_maps_to_quota_windows():
+    windows = config.claude_usage_windows({
+        "five_hour": {"utilization": 46.0, "resets_at": "2100-01-01T00:00:00+00:00"},
+        "seven_day": {"utilization": 36.0, "resets_at": None}, "extra": {}})
+    assert windows == {"5h": {"used": 46.0, "resets": 4102444800.0}, "week": {"used": 36.0, "resets": None}}
+    config.save_quota("claude", windows)
+    assert config.quota_line() == "claude 5j 54% · mgg 64%"
+    assert config.claude_usage_windows({}) == {}

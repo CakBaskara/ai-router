@@ -4,7 +4,7 @@ import sys
 import time
 import tomllib
 from collections import Counter
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from . import paths
@@ -104,6 +104,22 @@ def claude_windows(info: dict) -> dict:
     return {names[key]: {"used": w["utilization"] * 100, "resets": w.get("resetsAt")}
             for key, w in (info.get("unifiedWindows") or {}).items()
             if key in names and isinstance(w.get("utilization"), (int, float))}
+
+
+def claude_usage_windows(usage: dict) -> dict:
+    names = {"five_hour": "5h", "seven_day": "week"}
+    windows = {}
+    for key, label in names.items():
+        w = usage.get(key) or {}
+        if not isinstance(w.get("utilization"), (int, float)):
+            continue
+        resets = w.get("resets_at")
+        try:
+            resets = datetime.fromisoformat(resets).timestamp() if resets else None
+        except (TypeError, ValueError):
+            resets = None
+        windows[label] = {"used": w["utilization"], "resets": resets}
+    return windows
 
 
 def codex_windows(limits: dict) -> dict:

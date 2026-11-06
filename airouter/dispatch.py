@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import urllib.request
 from pathlib import Path
 
 from . import attach, config
@@ -167,16 +168,56 @@ def llm_text(system: str, text: str, model: str, timeout: int = 300) -> str | No
     return (_ask_claude(system, text, model, "medium", timeout) or "").strip() or None
 
 
+EFFORT_ORDER = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+CODEX_DEFAULT_EFFORTS = ("low", "medium", "high", "xhigh")
+CODEX_EFFORTS: dict[str, list[str]] = {}
+
+
+def efforts(provider: str, model: str | None) -> tuple[str, ...]:
+    if provider == "claude":
+        return CLAUDE_EFFORTS
+    return tuple(CODEX_EFFORTS.get(model or "") or CODEX_DEFAULT_EFFORTS)
+
+
+def fit_effort(level: str, supported) -> str:
+    supported = list(supported)
+    if level in supported or not supported:
+        return level
+    rank = EFFORT_ORDER.index(level) if level in EFFORT_ORDER else 2
+    return min(supported, key=lambda s: (abs((EFFORT_ORDER.index(s) if s in EFFORT_ORDER else 2) - rank),
+                                         EFFORT_ORDER.index(s) if s in EFFORT_ORDER else 2))
+
+
 def codex_models() -> list[str]:
     try:
         out = subprocess.run(codex_cmd() + ["debug", "models"], capture_output=True, timeout=30)
         data = json.loads(out.stdout.decode("utf-8", "replace"))
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
         return []
-    return [m["slug"] for m in data.get("models", []) if m.get("visibility") == "list" and m.get("slug")]
+    listed = [m for m in data.get("models", []) if m.get("visibility") == "list" and m.get("slug")]
+    for m in listed:
+        levels = [lv.get("effort") for lv in m.get("supported_reasoning_levels") or [] if lv.get("effort")]
+        if levels:
+            CODEX_EFFORTS[m["slug"]] = levels
+    return [m["slug"] for m in listed]
 
 
 DISCOVER = {"codex": codex_models}
+
+
+def read_claude_usage(timeout: float = 15) -> dict:
+    # Same endpoint Claude Code's /usage reads; the token is only sent to Anthropic, and an expired one is
+    # left for Claude Code to refresh.
+    try:
+        cred = json.loads((Path.home() / ".claude" / ".credentials.json").read_text(encoding="utf-8"))
+        token = cred["claudeAiOauth"]["accessToken"]
+        request = urllib.request.Request("https://api.anthropic.com/api/oauth/usage", headers={
+            "Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (OSError, KeyError, TypeError, ValueError):
+        return {}
 
 
 class CodexProc:

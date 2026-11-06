@@ -42,8 +42,20 @@ py -m pip install -e .
 | `ai --migrate-data` | Preview copying runtime data from the old installation |
 
 In the chat, Enter sends, Shift+Enter adds a line, Esc or ■ stops an answer, and Ctrl+O picks a
-model. Alt+V pastes a screenshot, and 📎 attaches a file. A pasted or dragged file path stays
+model and effort in one panel: ↑/↓ and Enter pick the model, ←/→ or a click on the slider set the effort,
+and the panel stays open until Esc. Ctrl+E and clicking the model chip open the same panel; `/effort high` and
+`/effort auto` work too. A pinned effort is fitted to the levels each model supports. Alt+V pastes a screenshot, and 📎 attaches a file. A pasted or dragged file path stays
 plain text. Type `/help` for the rest.
+
+While a model works, its reply shows only a loading line with the elapsed time; when it is done, only its
+final answer appears, the text after its last tool call. Set `show_work = true` under `[chat]` to stream tool
+calls and text as they happen instead.
+
+The quota in the top bar is re-read every 3 seconds. Claude and Codex usage is also polled every minute and whenever a
+reply starts or ends, so both providers stay current whichever one answers, and use from other apps shows up. Claude usage comes from the same endpoint Claude Code's `/usage`
+reads, with the login in `~/.claude/.credentials.json`.
+
+Links to local files in chat open with their associated application; web links open in the default browser.
 
 ## How it decides
 

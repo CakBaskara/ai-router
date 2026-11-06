@@ -21,6 +21,7 @@ HELP = (
     "/model auto               kembali ke routing otomatis\n"
     "/models                   daftar model yang bisa dipilih\n"
     "/model 3  /model sol      pilih model dari daftar (nomor atau nama)\n"
+    "/effort high  /effort auto     kunci effort (Ctrl+E pilih lewat slider)\n"
     "/claude /codex             kunci provider\n"
     "/codex gpt-5.6-sol        kunci provider dan model persis\n"
     "pakai opus  ganti ke codex  pakai auto   sama seperti /model dan /<provider>\n"
@@ -51,7 +52,7 @@ REVISE_PROMPT = (
 )
 VERDICT = re.compile(r"^\W*(LOLOS|REVISI)\b\W*$", re.M | re.I)
 STATE = ("tier", "provider", "model", "sessions", "synced", "transcript", "last_reply",
-         "pinned_provider", "pinned_tier", "pinned_model")
+         "pinned_provider", "pinned_tier", "pinned_model", "pinned_effort")
 RECAP_ENTRIES = 12
 RECAP_CHARS = 2000
 SWITCH = re.compile(
@@ -120,12 +121,34 @@ def _tool(name: str, args: dict) -> str:
     return _short(f"{name} {detail}")
 
 
-class ClaudeTurn:
+class Segments:
+    # Text written before a tool call is usually narration; the answer is what comes after the last one.
+    parts: list[str]
+    _cut = True
+
+    def _say(self, text: str):
+        if self._cut or not self.parts:
+            self.parts.append("")
+            self._cut = False
+        self.parts[-1] += text
+
+    def _split(self):
+        self._cut = True
+
+    def final(self) -> str:
+        for part in reversed(self.parts):
+            if part.strip():
+                return part.strip()
+        return self.text()
+
+
+class ClaudeTurn(Segments):
     def __init__(self):
         self.session = None
         self.reply = []
         self.usage = ""
         self.error = None
+        self.parts = []
 
     def feed(self, ev: dict):
         if ev.get("session_id"):
@@ -138,13 +161,16 @@ class ClaudeTurn:
             delta = e.get("delta", {})
             if e.get("type") == "content_block_delta" and delta.get("type") == "text_delta":
                 self.reply.append(delta["text"])
+                self._say(delta["text"])
                 return "text", delta["text"]
             if e.get("type") == "message_start" and self.reply:
                 self.reply.append("\n\n")
+                self._split()
                 return "break", ""
         elif kind == "assistant":
             for block in ev.get("message", {}).get("content", []):
                 if block.get("type") == "tool_use":
+                    self._split()
                     return "note", _tool(block.get("name"), block.get("input", {}))
         elif kind == "rate_limit_event":
             config.save_quota("claude", config.claude_windows(ev.get("rate_limit_info") or {}))
@@ -161,12 +187,13 @@ class ClaudeTurn:
         return "".join(self.reply).strip()
 
 
-class CodexTurn:
+class CodexTurn(Segments):
     def __init__(self):
         self.session = None
         self.reply = []
         self.usage = ""
         self.error = None
+        self.parts = []
         self.streamed = set()
 
     def feed(self, ev: dict):
@@ -177,22 +204,31 @@ class CodexTurn:
             self.session = ev.get("thread_id")
         elif kind == "item.delta" and itype == "agent_message":
             prefix = "\n\n" if item["id"] not in self.streamed and self.reply else ""
+            if item["id"] not in self.streamed:
+                self._split()
             self.streamed.add(item["id"])
             self.reply.append(prefix + item.get("text", ""))
+            self._say(item.get("text", ""))
             return "text", prefix + item.get("text", "")
         elif kind == "item.started" and itype == "command_execution":
+            self._split()
             return "note", _short(f"$ {item.get('command', '')}")
         elif kind == "item.started" and itype == "mcp_tool_call":
+            self._split()
             return "note", _tool(f"{item.get('server', '')}.{item.get('tool', '')}", item.get("arguments") or {})
         elif kind == "item.started" and itype == "web_search":
+            self._split()
             return "note", _short(f"search {item.get('query', '')}")
         elif kind == "item.completed" and itype == "agent_message":
             if item.get("id") in self.streamed:
                 return None
             prefix = "\n\n" if self.reply else ""
             self.reply.append(prefix + item.get("text", ""))
+            self._split()
+            self._say(item.get("text", ""))
             return "text", prefix + item.get("text", "")
         elif kind == "item.completed" and itype == "file_change":
+            self._split()
             paths = ", ".join(os.path.basename(c.get("path", "")) for c in item.get("changes", []))
             return "note", _short(f"edit {paths}")
         elif kind == "item.completed" and itype == "error":
@@ -417,6 +453,7 @@ class Chat:
         self.pinned_provider = provider
         self.pinned_tier = tier
         self.pinned_model = None
+        self.pinned_effort = None
         self._catalog = None
         self._catalog_lock = threading.Lock()
         self._proc = None
@@ -488,11 +525,29 @@ class Chat:
             self._codex.close()
             self._codex = None
 
-    def claude_route(self, tier: str) -> dict:
-        route = dict(self.cfg["tiers"][tier]["claude"])
-        if self.pinned_model and self.pinned_provider == "claude":
+    def route_for(self, tier: str, provider: str) -> dict:
+        route = dict(self.cfg["tiers"][tier][provider])
+        if self.pinned_model and provider == self.pinned_provider:
             route["model"] = self.pinned_model
+        if self.pinned_effort:
+            route["effort"] = dispatch.fit_effort(self.pinned_effort, dispatch.efforts(provider, route["model"]))
         return route
+
+    def claude_route(self, tier: str) -> dict:
+        return self.route_for(tier, "claude")
+
+    def effort_target(self) -> tuple[str, str]:
+        tier = self.pinned_tier or self.tier or self.cfg.get("chat", {}).get("min_tier") or "medium"
+        provider = self.pinned_provider or self.provider or self.order(tier)[0]
+        if self.pinned_model and provider == self.pinned_provider:
+            return provider, self.pinned_model
+        if self.model and provider == self.provider:
+            return provider, self.model
+        return provider, self.cfg["tiers"][tier][provider]["model"]
+
+    def set_effort(self, level: str | None):
+        self.pinned_effort = level
+        self.ui.info(f"effort dikunci: {level}" if level else "effort otomatis (ikut tier)")
 
     def _claude_proc(self, route: dict) -> ClaudeProc:
         key, session = (route["model"], route["effort"]), self.sessions.get("claude")
@@ -533,6 +588,11 @@ class Chat:
         self._started(p.proc)
         return p.ask(prompt, turn, show, files)
 
+    def _final(self, turn):
+        final = getattr(self.ui, "final", None)
+        if final:
+            final(turn.final())
+
     def _notes_only(self, kind: str, text: str):
         if kind == "note":
             self.ui.show(kind, text)
@@ -549,9 +609,7 @@ class Chat:
         for i, provider in enumerate(providers):
             if self.injected:
                 msg, self.injected = "\n\n".join([msg] + self.injected), []
-            route = dict(self.cfg["tiers"][tier][provider])
-            if self.pinned_model and provider == self.pinned_provider:
-                route["model"] = self.pinned_model
+            route = self.route_for(tier, provider)
             held = review_due(self.cfg, provider, route["model"])
             if held:
                 self.ui.info("jawaban ditahan sampai lolos review")
@@ -574,6 +632,8 @@ class Chat:
             if code == 0 and not turn.error and not turn.text():
                 turn.error = "tidak ada jawaban"
             ok = code == 0 and not turn.error
+            if not held:
+                self._final(turn)
             error = turn.error or (f"exit {code}" if code not in (0, 130) else "")
             self._log(msg, tier, reasons, llm, provider, route, code, seconds, turn.session, error)
             if ok or code == 130:
@@ -585,9 +645,11 @@ class Chat:
                         turn = self.refine(msg, tier, provider, route, turn, runner)
                         self.ui.start(tier, provider, route, ["final"])
                         self.ui.show("text", turn.text())
+                        self._final(turn)
                         self.ui.done(round(time.time() - begun, 1), turn.usage)
                 elif held:
                     self.ui.show("text", turn.text())
+                    self._final(turn)
                 reply = turn.text() + (" [dibatalkan]" if code == 130 else "")
                 with self._input_lock:
                     said = "\n\n".join([msg] + self.injected)
@@ -814,7 +876,8 @@ class Chat:
     def status(self) -> str:
         return (f"tier {self.pinned_tier or self.tier or '-'}{' (dikunci)' if self.pinned_tier else ''}"
                 f" · provider {self.pinned_provider or self.provider or '-'}"
-                f"{' (dikunci)' if self.pinned_provider else ''} · model {self.label()}")
+                f"{' (dikunci)' if self.pinned_provider else ''} · model {self.label()}"
+                f" · effort {self.pinned_effort or 'otomatis'}")
 
     def switch_command(self, msg: str) -> str | None:
         text = " ".join(msg.lower().split())
@@ -901,6 +964,14 @@ class Chat:
             self.pick(arg)
         elif name == "/models":
             self.list_models()
+        elif name == "/effort" and arg in ("auto", "otomatis"):
+            self.set_effort(None)
+        elif name == "/effort" and arg in dispatch.EFFORT_ORDER:
+            self.set_effort(arg)
+        elif name == "/effort":
+            provider, model = self.effort_target()
+            self.ui.info(f"effort {self.pinned_effort or 'otomatis'} · pilihan {provider} {model}: "
+                         + ", ".join(dispatch.efforts(provider, model)) + " · /effort <level> atau /effort auto")
         elif name[1:] in self.cfg["providers"]:
             self.pin(name[1:], arg or None)
         else:

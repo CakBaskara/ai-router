@@ -1,9 +1,13 @@
 import importlib
 import json
 import os
+import re
+import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from rich.text import Text
 from textual import on, work
@@ -13,6 +17,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.theme import Theme
+from textual.widget import Widget
 from textual.widgets import Button, Markdown, Static, TextArea, Tree
 
 from . import attach, config, dispatch, learn
@@ -20,6 +25,8 @@ from .chat import HELP, Chat
 
 PICKER_ORDER = ("codex", "claude")
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+EFFORT_NAMES = {"auto": "Otomatis", "minimal": "Minimal", "low": "Low", "medium": "Medium", "high": "High",
+                "xhigh": "Extra High", "max": "Max", "ultra": "Ultra"}
 PACKAGE = Path(__file__).parent
 MODULES = ("paths", "config", "attach", "dispatch", "learn", "codex", "chat", "tui")
 
@@ -96,6 +103,7 @@ Reply { height: auto; margin: 1 0 0 0; }
 Reply .who { color: #CCCCCC; text-style: bold; }
 Reply .why { color: #6E7681; }
 Reply .tools { color: #9D9D9D; padding-left: 2; display: none; }
+Reply .wait { color: #6E7681; padding-left: 2; display: none; }
 Reply Markdown { margin: 0; padding: 0 0 0 2; background: transparent; }
 Reply .stats { color: #6E7681; padding-left: 2; }
 Reply.failed .who { color: #F85149; }
@@ -115,6 +123,11 @@ Composer:focus { border: none; }
 Composer .text-area--selection { background: #264F78; }
 Composer .text-area--cursor { color: #1F1F1F; background: #CCCCCC; text-style: none; }
 ModelPicker { align: center middle; background: #000000 50%; }
+#effort-box { height: auto; border-top: solid #454545; padding: 1 0 0 0; }
+#effort-title { width: 1fr; color: #3794FF; text-style: bold; content-align: center middle; }
+#effort-model { width: 1fr; color: #6E7681; content-align: center middle; }
+#effort-slider { height: 1; margin: 1 0 0 0; }
+#effort-labels { height: 1; color: #9D9D9D; }
 CommandApproval { align: center middle; background: #000000 50%; }
 #approval { width: 80%; height: 80%; border: round #454545; background: #202020; padding: 1 2; }
 #approval-details { height: 1fr; }
@@ -152,6 +165,72 @@ def _shift_enter_as_newline():
     win32.KERNEL32.ReadConsoleInputW = read
 
 
+def _local_link_path(href: str) -> Path | None:
+    drive_path = bool(re.match(r"^[A-Za-z]:[/\\]", href))
+    parsed = urlsplit(href)
+    if not drive_path and parsed.scheme and parsed.scheme != "file":
+        return None
+    if not parsed.scheme and parsed.netloc:
+        return None
+    if parsed.scheme == "file":
+        host = parsed.netloc
+        candidate = parsed.path
+        if host and host.lower() != "localhost":
+            candidate = (host if host.endswith(":") else "//" + host) + candidate
+        candidate += ("?" + parsed.query if parsed.query else "") + ("#" + parsed.fragment if parsed.fragment else "")
+    else:
+        candidate = href
+    if re.match(r"^/[A-Za-z]:[/\\]", candidate):
+        candidate = candidate[1:]
+    if not candidate or candidate.startswith("#"):
+        return None
+    path = Path(candidate).expanduser()
+    if path.exists():
+        return path
+    candidate = re.sub(r":\d+(?::\d+)?$", "", candidate)
+    path = Path(candidate).expanduser()
+    if path.exists():
+        return path
+    candidate = re.sub(r":\d+(?::\d+)?$", "", candidate.split("#", 1)[0].split("?", 1)[0])
+    return Path(candidate).expanduser()
+
+
+def _open_local_file(path: Path):
+    if sys.platform == "win32":
+        os.startfile(str(path))
+    else:
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(path)],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, secs = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    return (f"{hours}h {minutes}m {secs}s" if hours else f"{minutes}m {secs}s")
+
+
+class Line(Widget):
+    # A Static update re-lays out the whole log, which with a long chat takes a large part of a second; a line
+    # whose width stays the same, like a spinner frame, only needs a repaint.
+    DEFAULT_CSS = "Line { width: auto; height: 1; }"
+
+    def __init__(self, text: str = "", **kwargs):
+        super().__init__(**kwargs)
+        self.text = text
+
+    def render(self) -> Text:
+        return Text(self.text)
+
+    def set(self, text: str):
+        if text == self.text:
+            return
+        relayout = len(text) != len(self.text)
+        self.text = text
+        self.refresh(layout=relayout)
+
+
 class UserBubble(Static):
     pass
 
@@ -161,12 +240,16 @@ class Info(Static):
 
 
 class Reply(Vertical):
-    def __init__(self, model: str, why: str, text: str = "", done: bool = False):
+    def __init__(self, model: str, why: str, text: str = "", done: bool = False, live: bool = True):
         super().__init__()
         self.model = model
         self.why = why
         self.text = text
         self.done = done
+        self.live = live
+        self.final = None
+        self.began = time.monotonic()
+        self.waited = None
         self.tools = []
         self.frame = 0
         self.timer = None
@@ -175,28 +258,49 @@ class Reply(Vertical):
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="head"):
-            yield Static(f"{'●' if self.done else SPINNER[0]} {self.model}", classes="who", markup=False)
+            yield Line(f"{'●' if self.done else SPINNER[0]} {self.model}", classes="who")
             yield Static(f"  {self.why}", classes="why", markup=False)
         yield Static("", classes="tools", markup=False)
-        yield Markdown(self.text)
+        yield Line("", classes="wait")
+        yield Markdown(self.text if self.live or self.done else "", open_links=False)
         yield Static("", classes="stats", markup=False)
 
     def on_mount(self):
         self.query_one(".head").styles.height = 1
-        self.query_one(".who").styles.width = "auto"
+        self.who_w = self.query_one(".who", Line)
+        self.why_w = self.query_one(".why", Static)
+        self.wait_w = self.query_one(".wait", Line)
+        self.stats_w = self.query_one(".stats", Static)
+        self.who_w.styles.width = "auto"
         self.ready = True
-        if self.tools:
+        if self.tools and self.live:
             self.show_tools()
         if self.end:
             self.show_end(*self.end)
         elif not self.done:
+            if not self.live:
+                self.show_wait()
             self.timer = self.set_interval(0.08, self.spin)
 
     def spin(self):
         self.frame += 1
-        self.query_one(".who", Static).update(f"{SPINNER[self.frame % len(SPINNER)]} {self.model}")
+        self.who_w.set(f"{SPINNER[self.frame % len(SPINNER)]} {self.model}")
+        if not self.live:
+            self.show_wait()
+
+    def show_wait(self):
+        seconds = int(time.monotonic() - self.began)
+        if seconds == self.waited:
+            return
+        self.waited = seconds
+        wait = self.wait_w
+        wait.set(f"memproses… {_duration(seconds)}")
+        wait.display = True
 
     def write(self, text: str):
+        if not self.live:
+            self.text += text
+            return None
         shown = self.query(Markdown)
         if shown:
             return shown.first().append(text)
@@ -205,7 +309,7 @@ class Reply(Vertical):
 
     def add_tool(self, text: str):
         self.tools.append(text)
-        if self.ready:
+        if self.ready and self.live:
             self.show_tools()
 
     def show_tools(self):
@@ -223,8 +327,13 @@ class Reply(Vertical):
             self.show_end(mark, stats)
 
     def show_end(self, mark: str, stats: str):
-        self.query_one(".who", Static).update(f"{mark} {self.model}")
-        self.query_one(".stats", Static).update(stats)
+        self.who_w.set(f"{mark} {self.model}")
+        self.stats_w.update(stats)
+        if not self.live:
+            self.wait_w.display = False
+            shown = self.final if self.final is not None else self.text.strip()
+            if shown:
+                self.query_one(Markdown).update(shown)
 
 
 class Composer(TextArea):
@@ -334,26 +443,113 @@ class ScrollButton(Static):
         self.app.query_one("#log", VerticalScroll).scroll_relative(y=self.direction * self.STEP, animate=False)
 
 
+class EffortSlider(Static):
+    def on_click(self, event):
+        event.stop()
+        self.parent.pick_at(event.x)
+
+
+class EffortPanel(Vertical):
+    WIDTH = 54
+    SETTLE = 0.6
+
+    def __init__(self, levels, current: str, target: str, **kwargs):
+        super().__init__(**kwargs)
+        self.timer = None
+        self.load(levels, current, target)
+
+    def load(self, levels, current: str, target: str):
+        self.levels = ["auto"] + list(levels)
+        self.index = self.levels.index(current) if current in self.levels else 0
+        self.applied = self.levels[self.index]
+        self.target = target
+        if self.is_mounted:
+            self.draw()
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="effort-title", markup=False)
+        yield Static("", id="effort-model", markup=False)
+        yield EffortSlider("", id="effort-slider")
+        yield Static("", id="effort-labels", markup=False)
+
+    def on_mount(self):
+        self.draw()
+
+    def positions(self) -> list[int]:
+        last = len(self.levels) - 1
+        return [round(i * (self.WIDTH - 1) / last) for i in range(len(self.levels))]
+
+    def draw(self):
+        level = self.levels[self.index]
+        self.query_one("#effort-title", Static).update(
+            "Effort " + EFFORT_NAMES.get(level, level) + ("  (ikut tier)" if level == "auto" else "")
+            + ("  ✓ dipakai" if level == self.applied else ""))
+        self.query_one("#effort-model", Static).update(self.target)
+        marks = self.positions()
+        knob = marks[self.index]
+        bar = Text()
+        for x in range(self.WIDTH):
+            if x == knob:
+                bar.append("●", "bold #FFFFFF")
+            elif x in marks:
+                bar.append("•", "#3794FF" if x < knob else "#6E7681")
+            else:
+                bar.append("━" if x < knob else "─", "#3794FF" if x < knob else "#3C3C3C")
+        self.query_one("#effort-slider", Static).update(bar)
+        row = [" "] * (self.WIDTH + 6)
+        for i, (name, x) in enumerate(zip(self.levels, marks)):
+            start = max(0, min(x - len(name) // 2, len(row) - len(name)))
+            if i == len(self.levels) - 1:
+                start = max(0, min(start, self.WIDTH - len(name)))
+            for j, ch in enumerate(name):
+                row[start + j] = ch
+        self.query_one("#effort-labels", Static).update("".join(row).rstrip())
+
+    def move(self, step: int):
+        # Each applied level restarts the warm Claude process, so a run of arrow presses applies once at rest.
+        self.index = max(0, min(len(self.levels) - 1, self.index + step))
+        self.draw()
+        if self.timer:
+            self.timer.stop()
+        self.timer = self.set_timer(self.SETTLE, self.choose)
+
+    def choose(self):
+        if self.timer:
+            self.timer.stop()
+            self.timer = None
+        self.applied = self.levels[self.index]
+        self.app.apply_effort(self.applied)
+        self.draw()
+
+    def pick_at(self, x: int):
+        marks = self.positions()
+        self.index = min(range(len(marks)), key=lambda i: abs(marks[i] - x))
+        self.choose()
+
+
 class ModelPicker(ModalScreen):
     BINDINGS = [
-        Binding("escape", "dismiss", "Tutup"),
+        Binding("escape", "close", "Tutup"),
         Binding("home", "first", show=False, priority=True),
         Binding("end", "last", show=False, priority=True),
+        Binding("left", "effort(-1)", show=False, priority=True),
+        Binding("right", "effort(1)", show=False, priority=True),
     ]
 
-    def __init__(self, catalog: list[tuple[str, str]], current: str, auto: bool, provider: str | None = None):
+    def __init__(self, catalog: list[tuple[str, str]], current: str, auto: bool, provider: str | None = None,
+                 effort: tuple | None = None):
         super().__init__()
         self.catalog = catalog
         self.current = current
         self.auto = auto
         self.provider = provider
+        self.effort = effort or (dispatch.CLAUDE_EFFORTS, "auto", "")
 
     def compose(self) -> ComposeResult:
         tree = Tree("model", id="picker-tree")
         tree.show_root = False
         tree.guide_depth = 3
-        tree.root.add_leaf(Text.assemble(("● " if self.auto else "  "), ("Otomatis", "bold"),
-                                         ("  router memilih per pesan", "dim")), data="auto")
+        self.leaves = [tree.root.add_leaf(self.label("auto"), data="auto")]
         present = list(dict.fromkeys(p for p, _ in self.catalog))
         for provider in [p for p in PICKER_ORDER if p in present] + [p for p in present if p not in PICKER_ORDER]:
             models = [(i, m) for i, (p, m) in enumerate(self.catalog) if p == provider]
@@ -361,16 +557,32 @@ class ModelPicker(ModalScreen):
             folder = tree.root.add(Text.assemble((provider.capitalize(), "bold"),
                                                  (f"  {len(models)} model", "dim")),
                                    expand=mine)
-            folder.add_leaf(Text.assemble(("● " if mine and self.current == provider else "  "),
-                                          ("otomatis", "italic"), ("  model dipilih router", "dim")),
-                            data=f"prov:{provider}")
+            self.leaves.append(folder.add_leaf(self.label(f"prov:{provider}"), data=f"prov:{provider}"))
             for i, model in models:
-                mark = "● " if mine and model == self.current else "  "
-                folder.add_leaf(Text.assemble(mark, model), data=str(i + 1))
+                self.leaves.append(folder.add_leaf(self.label(str(i + 1)), data=str(i + 1)))
         with Vertical(id="picker"):
-            yield Static("Pilih model", id="picker-title")
+            yield Static("Pilih model dan effort", id="picker-title")
             yield tree
-            yield Static("↑↓ pilih · Enter buka / pakai · Esc tutup", id="picker-hint")
+            yield EffortPanel(*self.effort, id="effort-box")
+            yield Static("↑↓ pilih model · Enter buka / pakai · ←→ atau klik atur effort · Esc tutup",
+                         id="picker-hint")
+
+    def label(self, data: str) -> Text:
+        if data == "auto":
+            return Text.assemble(("● " if self.auto else "  "), ("Otomatis", "bold"),
+                                 ("  router memilih per pesan", "dim"))
+        if data.startswith("prov:"):
+            provider = data[5:]
+            mark = "● " if not self.auto and provider == self.provider and self.current == provider else "  "
+            return Text.assemble(mark, ("otomatis", "italic"), ("  model dipilih router", "dim"))
+        provider, model = self.catalog[int(data) - 1]
+        mine = not self.auto and provider == self.provider
+        return Text.assemble("● " if mine and model == self.current else "  ", model)
+
+    def mark(self, current: str, auto: bool, provider: str | None):
+        self.current, self.auto, self.provider = current, auto, provider
+        for leaf in self.leaves:
+            leaf.set_label(self.label(leaf.data))
 
     def on_mount(self):
         tree = self.query_one(Tree)
@@ -384,9 +596,20 @@ class ModelPicker(ModalScreen):
         tree = self.query_one(Tree)
         tree.move_cursor_to_line(tree.last_line)
 
+    def action_effort(self, step: int):
+        self.query_one(EffortPanel).move(step)
+
+    def action_close(self):
+        panel = self.query_one(EffortPanel)
+        if panel.timer:
+            panel.choose()
+        self.dismiss(None)
+
     def on_tree_node_selected(self, event: Tree.NodeSelected):
         if event.node.data:
-            self.dismiss(event.node.data)
+            self.app.apply_model(event.node.data)
+            self.mark(*self.app.picker_state())
+            self.query_one(EffortPanel).load(*self.app.effort_state())
 
 
 class CommandApproval(ModalScreen):
@@ -441,13 +664,16 @@ class TuiUI:
         return decision[0]
 
     def start(self, tier: str, provider: str, route: dict, reasons: list[str]):
-        self._call(self.app.start_reply, route["model"], f"{provider} · {tier} · {route['effort']}")
+        self._call(self.app.start_reply, route["model"], f"{provider} · {route['effort']}", route["effort"])
 
     def show(self, kind: str, text: str):
         self._call(self.app.reply_show, kind, text)
 
+    def final(self, text: str):
+        self._call(self.app.reply_final, text)
+
     def done(self, seconds: float, usage: str):
-        self._call(self.app.end_reply, "●", f"✓ {seconds}s" + (f" · {usage}" if usage else ""), False)
+        self._call(self.app.end_reply, "●", f"✓ {_duration(seconds)}" + (f" · {usage}" if usage else ""), False)
 
     def failed(self, provider: str, code: int, error: str, fallback: str | None):
         if code == 130:
@@ -463,6 +689,7 @@ class ChatApp(App):
     BINDINGS = [
         Binding("escape", "cancel", "Batal"),
         Binding("ctrl+o", "models", "Model"),
+        Binding("ctrl+e", "effort", "Effort", priority=True),
         Binding("ctrl+n", "new", "Baru"),
         Binding("ctrl+q", "quit", "Keluar"),
     ]
@@ -477,6 +704,11 @@ class ChatApp(App):
         self.draft = carry.get("draft", "")
         self.pending = list(carry.get("queue", []))
         self.reply = None
+        self.reply_effort = None
+        self.show_work = bool(cfg.get("chat", {}).get("show_work", False))
+        self._quota_shown = None
+        self._log = self._sticky = self._sticky_who = self._sticky_why = self._quota_w = self._model_w = None
+        self._polled = float("-inf")
         self._busy = False
         self.queue = []
         self.attachments = list(carry.get("attachments", []))
@@ -507,6 +739,13 @@ class ChatApp(App):
                 yield AttachButton("📎", id="clip")
 
     def on_mount(self):
+        self._log = self.query_one("#log", VerticalScroll)
+        self._sticky = self.query_one("#sticky")
+        self._sticky_who = self.query_one("#sticky-who", Static)
+        self._sticky_why = self.query_one("#sticky-why", Static)
+        self._quota_w = self.query_one("#quota", Static)
+        self._model_w = self.query_one("#model", Static)
+        self._stop_w = self.query_one("#stop", Static)
         self.register_theme(DARK_MODERN)
         self.theme = DARK_MODERN.name
         if self.restored:
@@ -518,7 +757,7 @@ class ChatApp(App):
             self.add_info("Kode diperbarui dan dimuat ulang; percakapan tetap berlanjut.")
         else:
             self.add_info("Edit dan perintah dijalankan otomatis (mode auto). "
-                          "Ctrl+O ganti model · Esc hentikan jawaban · /help perintah")
+                          "Ctrl+O pilih model dan effort · Esc hentikan jawaban · /help perintah")
         self.query_one("#log", VerticalScroll).anchor()
         self.refresh_status()
         composer = self.query_one(Composer)
@@ -533,8 +772,9 @@ class ChatApp(App):
             self.call_after_refresh(self.after_send)
         self.warm_catalog()
         self.warm_classifier()
-        self.warm_quota()
-        self.set_interval(30, self.refresh_quota)
+        self.poll_quota_soon()
+        self.set_interval(60, self.poll_quota_soon)
+        self.set_interval(3, self.refresh_quota)
         self.chat.prewarm()
         self.set_interval(2, self.check_code)
         self.set_interval(0.1, self.inject_queued)
@@ -550,7 +790,8 @@ class ChatApp(App):
     @busy.setter
     def busy(self, value: bool):
         self._busy = value
-        for stop in self.query("#stop"):
+        stop = getattr(self, "_stop_w", None)
+        if stop:
             stop.set_class(value, "busy")
 
     def code_changed(self) -> bool:
@@ -580,14 +821,28 @@ class ChatApp(App):
     def warm_catalog(self):
         self.chat.catalog()
 
-    @work(thread=True)
-    def warm_quota(self):
-        config.save_quota("codex", config.codex_windows(dispatch.read_limits()))
+    def poll_quota_soon(self):
+        if time.monotonic() - self._polled >= 15:
+            self._polled = time.monotonic()
+            self.poll_quota()
+
+    @work(thread=True, exclusive=True, group="quota")
+    def poll_quota(self):
+        # Claude also reports usage during its own replies; polling catches use from other apps and Codex.
+        providers = self.chat.cfg["providers"]
+        if "claude" in providers:
+            config.save_quota("claude", config.claude_usage_windows(dispatch.read_claude_usage()))
+        if "codex" in providers:
+            config.save_quota("codex", config.codex_windows(dispatch.read_limits()))
         self.call_from_thread(self.refresh_quota)
 
     def refresh_quota(self):
-        for widget in self.query("#quota"):
-            widget.update(config.quota_line())
+        line = config.quota_line()
+        if line == self._quota_shown:
+            return
+        self._quota_shown = line
+        if self._quota_w:
+            self._quota_w.update(line)
 
     @work(thread=True)
     def warm_classifier(self):
@@ -597,30 +852,28 @@ class ChatApp(App):
     def refresh_status(self):
         queued = f"  ·  antre {len(self.queue)}" if self.queue else ""
         model = self.reply.model if self.busy and self.reply else self.chat.label()
-        self.query_one("#model", Static).update(f"◆ {model} ▾{queued}")
+        effort = self.reply_effort if self.busy and self.reply else self.chat.pinned_effort
+        self._model_w.update(f"◆ {model} · {EFFORT_NAMES.get(effort or 'auto', effort)} ▾{queued}")
+        self._quota_shown = None
         self.refresh_quota()
 
     def refresh_sticky(self):
-        logs = self.query("#log")
-        stickies = self.query("#sticky")
-        if not logs or not stickies:
+        log = self._log
+        if log is None or not log.is_attached:
             return
-        log = logs[0]
         top = log.content_region.y
-        visible = next((reply for reply in reversed(list(log.query(Reply)))
-                        if reply.region.y < top < reply.region.bottom), None)
-        heads = {target: visible.query_one(source, Static).render()
-                 for target, source in (("#sticky-who", ".who"), ("#sticky-why", ".why"))} if visible else {}
-        shown = {target: str(content) for target, content in heads.items()}
+        visible = next((child for child in reversed(log.children) if isinstance(child, Reply) and child.ready
+                        and child.region.y < top < child.region.bottom), None)
+        heads = {self._sticky_who: visible.who_w.render(), self._sticky_why: visible.why_w.render()} if visible else {}
+        shown = {id(target): str(content) for target, content in heads.items()}
         # Each update reflows the whole log, and this runs ten times a second; touching the
         # widgets only on a change keeps an idle window from burning a CPU core.
         if shown == getattr(self, "_sticky_shown", None):
             return
         self._sticky_shown = shown
-        stickies[0].visible = visible is not None
+        self._sticky.visible = visible is not None
         for target, content in heads.items():
-            for widget in self.query(target):
-                widget.update(content)
+            target.update(content)
 
     def _mount(self, widget):
         self.query_one("#log", VerticalScroll).mount(widget)
@@ -628,10 +881,30 @@ class ChatApp(App):
     def add_info(self, text: str):
         self._mount(Info(text, markup=False))
 
-    def start_reply(self, model: str, why: str):
-        self.reply = Reply(model, why)
+    def start_reply(self, model: str, why: str, effort: str | None = None):
+        self.reply = Reply(model, why, live=self.show_work)
+        self.reply_effort = effort
         self._mount(self.reply)
         self.refresh_status()
+        self.poll_quota_soon()
+
+    def reply_final(self, text: str):
+        if self.reply:
+            self.reply.final = text
+
+    def on_markdown_link_clicked(self, event: Markdown.LinkClicked):
+        event.stop()
+        try:
+            path = _local_link_path(event.href)
+            if path is None:
+                self.open_url(event.href)
+                return
+            path = path.resolve()
+            if not path.exists():
+                raise FileNotFoundError(f"Berkas tidak ditemukan: {path}")
+            _open_local_file(path)
+        except (OSError, ValueError) as exc:
+            self.notify(f"Tidak bisa membuka berkas: {exc}", severity="error")
 
     def reply_show(self, kind: str, text: str):
         if not self.reply:
@@ -647,6 +920,7 @@ class ChatApp(App):
         if self.reply:
             self.reply.finish(mark, stats)
             self.reply.set_class(failed, "failed")
+        self.poll_quota_soon()
 
     @on(Composer.Submitted)
     def submitted(self, event: Composer.Submitted):
@@ -674,12 +948,14 @@ class ChatApp(App):
         old = self.reply
         if old:
             old.finish("●", "")
+            if not old.live:
+                old.remove()
         if bubble:
             bubble.remove_class("queued")
         else:
             self._bubble(text, files)
         if old:
-            self.start_reply(old.model, old.why)
+            self.start_reply(old.model, old.why, self.reply_effort)
 
     def inject_queued(self):
         if not self.busy:
@@ -812,6 +1088,20 @@ class ChatApp(App):
         self.refresh_status()
         self.chat.prewarm()
 
+    def action_effort(self):
+        self.action_models()
+
+    def effort_state(self) -> tuple:
+        provider, model = self.chat.effort_target()
+        return dispatch.efforts(provider, model), self.chat.pinned_effort or "auto", f"{provider} · {model}"
+
+    def apply_effort(self, choice: str):
+        self.chat.set_effort(None if choice == "auto" else choice)
+        self.notify(f"Effort: {EFFORT_NAMES.get(choice, choice)}")
+        self.refresh_status()
+        if not self.busy:
+            self.chat.prewarm()
+
     def action_models(self):
         if isinstance(self.screen, ModelPicker):
             return
@@ -829,13 +1119,22 @@ class ChatApp(App):
     def open_picker(self):
         if isinstance(self.screen, ModelPicker):
             return
+        current, auto, provider = self.picker_state()
+        self.push_screen(ModelPicker(self.chat.catalog(), current, auto, provider, self.effort_state()), self.picked)
+
+    def picker_state(self) -> tuple[str, bool, str | None]:
         c = self.chat
         auto = not (c.pinned_model or c.pinned_provider)
         provider = c.pinned_provider or c.provider
         current = c.pinned_model or (provider if c.pinned_provider and not c.pinned_model else c.label())
-        self.push_screen(ModelPicker(c.catalog(), current, auto, provider), self.picked)
+        return current, auto, provider
 
     def picked(self, choice):
+        if choice:
+            self.apply_model(choice)
+        self.query_one(Composer).focus()
+
+    def apply_model(self, choice: str):
         if choice == "auto":
             self.chat.command("/model auto")
             self.notify("Model: otomatis")
@@ -846,8 +1145,8 @@ class ChatApp(App):
             self.chat.pick(choice)
             self.notify(f"Model: {self.chat.label()} ({self.chat.pinned_provider})")
         self.refresh_status()
-        self.chat.prewarm()
-        self.query_one(Composer).focus()
+        if not self.busy:
+            self.chat.prewarm()
 
 
 def run(cfg: dict, provider: str | None = None, tier: str | None = None, use_llm: bool = True) -> int:

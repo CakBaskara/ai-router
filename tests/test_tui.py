@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from textual.app import App
 from textual.widgets import Markdown, Static
 
@@ -7,7 +9,7 @@ from airouter import config
 from airouter.chat import Chat
 from textual.containers import VerticalScroll
 
-from airouter.tui import ChatApp, Composer, ModelPicker, Reply, ScrollButton, UserBubble
+from airouter.tui import ChatApp, Composer, EffortPanel, ModelPicker, Reply, ScrollButton, UserBubble
 
 CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing", "loop")}, "providers": ["claude", "codex"]}
 
@@ -291,6 +293,7 @@ def test_scroll_buttons_move_the_log():
 def test_long_reply_keeps_running_and_finished_status_visible():
     async def go():
         app = make_app()
+        app.show_work = True
         async with app.run_test(size=(80, 20)) as pilot:
             app.start_reply("gpt-6-sol", "codex · medium · medium")
             await pilot.pause()
@@ -316,6 +319,7 @@ def test_long_reply_keeps_running_and_finished_status_visible():
 def test_idle_sticky_header_is_not_redrawn():
     async def go():
         app = make_app()
+        app.show_work = True
         async with app.run_test(size=(80, 20)) as pilot:
             app.start_reply("gpt-6-sol", "codex · medium · medium")
             await pilot.pause()
@@ -378,7 +382,7 @@ def test_prompt_sent_while_claude_answers_is_injected_not_queued():
             await pilot.pause(0.1)
             assert injected == ["kedua"] and not app.queue
             assert not app.query(UserBubble)[-1].has_class("queued")
-            assert len(app.query(Reply)) == 2
+            assert len(app.query(Reply)) == 1
             release.set()
             await _until(pilot, lambda: not app.busy)
             assert not app.busy
@@ -474,6 +478,7 @@ def test_stop_button_shows_while_busy_and_cancels():
 def test_streaming_reply_follows_until_user_scrolls_up():
     async def go():
         app = make_app()
+        app.show_work = True
         async with app.run_test(size=(80, 20)) as pilot:
             app.start_reply("sonnet", "claude · medium")
             await pilot.pause()
@@ -502,6 +507,7 @@ def test_streaming_reply_follows_until_user_scrolls_up():
 def test_bottom_of_log_holds_still_while_header_sticks():
     async def go():
         app = make_app()
+        app.show_work = True
         async with app.run_test(size=(80, 20)) as pilot:
             app.start_reply("sonnet", "claude · medium")
             await pilot.pause()
@@ -555,3 +561,268 @@ def test_reply_streamed_before_mount_keeps_text_and_tools():
             assert "Read iso.c" in str(reply.query_one(".tools").render())
             assert str(reply.query_one(".stats").render()) == "✓ 1s"
     asyncio.run(go())
+
+
+@pytest.mark.parametrize("kind", ["native", "posix", "leading-drive", "uri", "line", "fragment", "relative"])
+def test_local_markdown_links_use_file_opener(tmp_path, monkeypatch, kind):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    import os
+    from airouter import tui
+
+    file = tmp_path / "rencana mimpi 日本.xlsx"
+    file.write_bytes(b"test")
+    monkeypatch.chdir(tmp_path)
+    href = {
+        "native": str(file), "posix": file.as_posix(),
+        "leading-drive": "/" + file.as_posix() if os.name == "nt" else file.as_posix(),
+        "uri": file.as_uri(), "line": file.as_posix() + ":12:3",
+        "fragment": file.as_posix() + "#section", "relative": file.name,
+    }[kind]
+    opener = Mock()
+    monkeypatch.setattr(tui, "_open_local_file", opener)
+    app = SimpleNamespace(open_url=Mock(), notify=Mock())
+    event = Markdown.LinkClicked(Markdown(open_links=False), href)
+    ChatApp.on_markdown_link_clicked(app, event)
+    opener.assert_called_once_with(file.resolve())
+    app.open_url.assert_not_called()
+    app.notify.assert_not_called()
+
+
+@pytest.mark.parametrize("name", ["report#final.xlsx", "report100%20.xlsx"])
+def test_local_link_preserves_encoded_characters(tmp_path, name):
+    from airouter.tui import _local_link_path
+
+    file = tmp_path / name
+    file.write_bytes(b"test")
+    href = Markdown.LinkClicked(Markdown(open_links=False), file.as_uri()).href
+    assert _local_link_path(href) == file
+
+
+@pytest.mark.parametrize("href", ["https://example.com/report.xlsx", "http://example.com/", "mailto:user@example.com"])
+def test_web_links_keep_browser_behavior(monkeypatch, href):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from airouter import tui
+
+    opener = Mock()
+    monkeypatch.setattr(tui, "_open_local_file", opener)
+    app = SimpleNamespace(open_url=Mock(), notify=Mock())
+    ChatApp.on_markdown_link_clicked(app, Markdown.LinkClicked(Markdown(open_links=False), href))
+    app.open_url.assert_called_once_with(href)
+    opener.assert_not_called()
+    app.notify.assert_not_called()
+
+
+@pytest.mark.parametrize("missing", [True, False])
+def test_missing_or_unopenable_file_reports_error_without_browser(tmp_path, monkeypatch, missing):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from airouter import tui
+
+    file = tmp_path / "report.xlsx"
+    if not missing:
+        file.write_bytes(b"test")
+    opener = Mock(side_effect=PermissionError("access denied"))
+    monkeypatch.setattr(tui, "_open_local_file", opener)
+    app = SimpleNamespace(open_url=Mock(), notify=Mock())
+    ChatApp.on_markdown_link_clicked(app, Markdown.LinkClicked(Markdown(open_links=False), file.as_posix()))
+    app.open_url.assert_not_called()
+    app.notify.assert_called_once()
+    assert app.notify.call_args.kwargs["severity"] == "error"
+    assert opener.call_count == (0 if missing else 1)
+
+
+@pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
+def test_local_file_opener_uses_platform_association(tmp_path, monkeypatch, platform):
+    from unittest.mock import Mock
+    from airouter import tui
+
+    file = (tmp_path / "file with spaces.xlsx").resolve()
+    startfile, popen = Mock(), Mock()
+    monkeypatch.setattr(tui.os, "startfile", startfile, raising=False)
+    monkeypatch.setattr(tui.subprocess, "Popen", popen)
+    monkeypatch.setattr(tui.sys, "platform", platform)
+    tui._open_local_file(file)
+    if platform == "win32":
+        startfile.assert_called_once_with(str(file))
+        popen.assert_not_called()
+    else:
+        startfile.assert_not_called()
+        assert popen.call_args.args == (["open" if platform == "darwin" else "xdg-open", str(file)],)
+        assert not popen.call_args.kwargs.get("shell")
+
+
+@pytest.mark.parametrize("web", [False, True])
+def test_clicking_rendered_reply_link_routes_once(tmp_path, monkeypatch, web):
+    from unittest.mock import Mock
+    from airouter import tui
+
+    from urllib.parse import quote
+
+    file = tmp_path / "rencana mimpi 日本 100%20.xlsx"
+    file.write_bytes(b"test")
+    href = "https://example.com/report.xlsx" if web else quote(file.as_posix(), safe="/:")
+    opener = Mock()
+    monkeypatch.setattr(tui, "_open_local_file", opener)
+
+    async def go():
+        app = make_app()
+        browser = Mock()
+        app.open_url = browser
+        async with app.run_test(size=(100, 32)) as pilot:
+            app._mount(Reply("codex", "", f"[Buka Excel](<{href}>)", done=True))
+            await pilot.pause()
+            await pilot.click("Reply Markdown", offset=(3, 0))
+            await pilot.pause()
+            if web:
+                browser.assert_called_once_with(href)
+                opener.assert_not_called()
+            else:
+                opener.assert_called_once_with(file.resolve())
+                browser.assert_not_called()
+    asyncio.run(go())
+
+
+def test_hidden_work_shows_loading_then_only_the_final_answer():
+    async def go():
+        app = make_app()
+        release = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        events = [
+            {"type": "system", "subtype": "init", "session_id": "s1"},
+            {"type": "stream_event", "event": {"type": "content_block_delta",
+                                               "delta": {"type": "text_delta", "text": "Saya cek dulu."}}},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read",
+                                                           "input": {"file_path": "iso.c"}}]}},
+            {"type": "stream_event", "event": {"type": "message_start", "message": {}}},
+            {"type": "stream_event", "event": {"type": "content_block_delta",
+                                               "delta": {"type": "text_delta", "text": "Jawaban **akhir**."}}},
+            {"type": "result", "is_error": False, "usage": {"input_tokens": 5, "output_tokens": 9}},
+        ]
+
+        def runner(cmd, prompt, turn, show, started):
+            for i, ev in enumerate(events):
+                if i == 3:
+                    asyncio.run_coroutine_threadsafe(release.wait(), loop).result()
+                shown = turn.feed(ev)
+                if shown:
+                    show(*shown)
+            return 0
+
+        app.chat.send = lambda text, attachments=(): Chat.send(app.chat, text, runner=runner)
+        async with app.run_test(size=(100, 32)) as pilot:
+            app.query_one(Composer).insert("cek iso")
+            await pilot.press("enter")
+            await _until(pilot, lambda: app.query(Reply) and app.query_one(Reply).tools)
+            reply = app.query_one(Reply)
+            assert reply.query_one(".wait").display
+            assert "memproses" in str(reply.query_one(".wait").render())
+            assert not reply.query_one(".tools").display
+            assert reply.query_one(Markdown).source == ""
+            release.set()
+            await _until(pilot, lambda: not app.busy)
+            await pilot.pause(0.2)
+            assert reply.query_one(Markdown).source == "Jawaban **akhir**."
+            assert not reply.query_one(".wait").display
+            assert app.chat.transcript[-1][1] == "Saya cek dulu.\n\nJawaban **akhir**."
+    asyncio.run(go())
+
+
+def test_quota_poll_updates_the_top_bar(monkeypatch):
+    from airouter import dispatch
+
+    async def go():
+        app = make_app()
+        usage = {"five_hour": {"utilization": 30.0, "resets_at": "2100-01-01T00:00:00+00:00"}}
+        monkeypatch.setattr(dispatch, "read_claude_usage", lambda timeout=15: usage)
+        async with app.run_test(size=(120, 32)) as pilot:
+            await _until(pilot, lambda: "claude 5j 70%" in str(app.query_one("#quota").render()))
+            assert "claude 5j 70%" in str(app.query_one("#quota").render())
+            config.save_quota("claude", {"5h": {"used": 45, "resets": 4102444800}})
+            await _until(pilot, lambda: "55%" in str(app.query_one("#quota").render()), timeout=5)
+            assert "claude 5j 55%" in str(app.query_one("#quota").render())
+    asyncio.run(go())
+
+
+def test_one_panel_picks_model_and_effort_and_stays_open():
+    from textual.widgets import Tree
+
+    async def go():
+        app = make_app()
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.press("ctrl+o")
+            await pilot.pause()
+            picker = app.screen
+            panel = picker.query_one(EffortPanel)
+            tree = picker.query_one(Tree)
+            haiku = next(leaf for leaf in picker.leaves if leaf.data == "1")
+            haiku.parent.expand()
+            await pilot.pause()
+            tree.move_cursor(haiku)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.screen is picker and app.chat.pinned_model == "haiku"
+            assert "●" in str(haiku.label) and "●" not in str(picker.leaves[0].label)
+            assert panel.levels == ["auto", "low", "medium", "high", "xhigh", "max"]
+            assert "claude · haiku" in str(picker.query_one("#effort-model").render())
+            await pilot.press("right", "right", "right")
+            assert app.chat.pinned_effort is None
+            await _until(pilot, lambda: app.chat.pinned_effort == "high")
+            assert app.screen is picker
+            assert "dipakai" in str(picker.query_one("#effort-title").render())
+            assert "haiku · High" in str(app.query_one("#model").render())
+            assert app.chat.route_for("light", "claude") == {"model": "haiku", "effort": "high"}
+            await pilot.click("#effort-slider", offset=(EffortPanel.WIDTH - 1, 0))
+            await pilot.pause()
+            assert app.chat.pinned_effort == "max" and app.screen is picker
+            await pilot.click("#effort-slider", offset=(0, 0))
+            await pilot.pause()
+            assert app.chat.pinned_effort is None
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, ModelPicker)
+            await pilot.press("ctrl+e")
+            await pilot.pause()
+            assert isinstance(app.screen, ModelPicker)
+    asyncio.run(go())
+
+
+def test_closing_the_panel_applies_a_pending_effort():
+    async def go():
+        app = make_app()
+        app.chat.pinned_provider, app.chat.pinned_model = "claude", "opus"
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.press("ctrl+o")
+            await pilot.pause()
+            await pilot.press("right", "escape")
+            await pilot.pause()
+            assert app.chat.pinned_effort == "low"
+    asyncio.run(go())
+
+
+def test_a_reply_starting_or_ending_polls_both_quotas(monkeypatch):
+    from airouter import dispatch
+
+    async def go():
+        app = make_app()
+        calls = []
+        monkeypatch.setattr(dispatch, "read_limits", lambda timeout=20: calls.append("codex") or {})
+        async with app.run_test(size=(100, 32)) as pilot:
+            await _until(pilot, lambda: calls)
+            assert calls == ["codex"]
+            app.start_reply("opus", "claude · high")
+            await pilot.pause(0.2)
+            assert calls == ["codex"]
+            app._polled -= 15
+            app.end_reply("●", "", False)
+            await _until(pilot, lambda: len(calls) == 2)
+            assert calls == ["codex", "codex"]
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("seconds, shown", [(0, "0s"), (12.3, "12.3s"), (59, "59s"), (60, "1m 0s"),
+                                            (62, "1m 2s"), (197.4, "3m 17s"), (3661, "1h 1m 1s")])
+def test_durations_switch_to_minutes_and_hours(seconds, shown):
+    from airouter.tui import _duration
+    assert _duration(seconds) == shown

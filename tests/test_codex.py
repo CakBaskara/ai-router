@@ -241,7 +241,7 @@ def test_codex_ui_injects_without_queue_and_updates_model_label(server):
             await pilot.press("enter")
             await pilot.pause(0.1)
             assert not app.queue and not app.query(UserBubble)[-1].has_class("queued")
-            assert len(app.query(Reply)) == 2
+            assert len(app.query(Reply)) == 1
             server.notify("item/completed", turnId="turn-1", item={
                 "id": "answer-1", "type": "agentMessage", "text": "both handled"})
             server.finish()

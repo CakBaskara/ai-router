@@ -5,3 +5,4 @@ __pycache__/
 _pytest_safe_run*/
 test-tmp/
 .codex_work/
+docs/AI_ROUTER_V02_REFACTOR_GUIDE.md

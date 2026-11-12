@@ -39,19 +39,21 @@ py -m pip install -e .
 | `ai --ml` | See how the router's model is doing |
 | `ai --style` | How long and padded the chat answers are, per provider |
 | `ai --quota` | Claude and Codex usage left in the 5-hour and weekly windows |
+| `ai --eval-routing FILE.jsonl` | Evaluate routing against an independent holdout |
 | `ai --migrate-data` | Preview copying runtime data from the old installation |
 
 In the chat, Enter sends, Shift+Enter adds a line, Esc or ■ stops an answer, and Ctrl+O picks a
 model and effort in one panel: ↑/↓ and Enter pick the model, ←/→ or a click on the slider set the effort,
 and the panel stays open until Esc. Ctrl+E and clicking the model chip open the same panel; `/effort high` and
 `/effort auto` work too. A pinned effort is fitted to the levels each model supports. Alt+V pastes a screenshot, and 📎 attaches a file. A pasted or dragged file path stays
-plain text. Type `/help` for the rest.
+plain text. The ⟲ button, Ctrl+H, or `/history` opens the last 100 saved conversations; provider sessions and routing choices
+are restored when a conversation is continued. Type `/help` for the rest.
 
 While a model works, its reply shows only a loading line with the elapsed time; when it is done, only its
 final answer appears, the text after its last tool call. Set `show_work = true` under `[chat]` to stream tool
 calls and text as they happen instead.
 
-The quota in the top bar is re-read every 3 seconds. Claude and Codex usage is also polled every minute and whenever a
+The ◎ button opens the token quota in the top bar; its details are re-read every 3 seconds. Claude and Codex usage is also polled every minute and whenever a
 reply starts or ends, so both providers stay current whichever one answers, and use from other apps shows up. Claude usage comes from the same endpoint Claude Code's `/usage`
 reads, with the login in `~/.claude/.credentials.json`.
 
@@ -89,16 +91,50 @@ answers and kept only if it scores better; otherwise the old one comes back. The
 
 ## Good to know
 
-- In the chat, edits and commands run without asking. Each CLI's own safety settings still
-  apply.
-- Codex command approval requests appear in the chat with one-time accept and reject buttons.
-  Restart `ai` after updating to enable this dialog; console-only clients decline these requests.
+- The default `full-access` mode never asks for permission: Claude runs with `bypassPermissions` and Codex with
+  `danger-full-access` and approval `never`, like the IDE extensions in full-access mode. Choose a stricter mode
+  below when a project needs a sandbox or prompts.
+- In `approval-required` mode, Claude and Codex tool, command, file-change and permission requests show one-time
+  allow/reject dialogs. Console-only clients decline requests they cannot show.
+- Automatic failover happens only when a provider could not start. Once a turn was dispatched, AI Router
+  stops instead of risking duplicate edits or external actions.
 - Messages sent while Claude or Codex is replying join the active work. A message arriving
   after the turn has ended starts a follow-up reply. Model-switch commands take effect between turns.
-- Claude and Codex chat sessions use the current project, explicitly configured `chat.dirs`, and attachment
-  storage. The ai-router installation folder is no longer added automatically. The bundled `chat.dirs` is empty;
-  a migrated configuration keeps its existing directories. Restart sessions to pick up changes to permissions.
+- Claude and Codex chat sessions start in the current project. In the sandboxed modes, the installation and
+  attachment directories are not writable roots. Restart sessions after changing security settings.
 - Settings use the bundled `airouter/config.toml` as defaults, with user settings overlaid as described below.
+
+## Security modes
+
+```toml
+[security]
+mode = "full-access" # full-access, workspace-write, approval-required, or read-only
+allow_network = false
+extra_write_roots = []
+
+[chat]
+dirs = [] # folders Claude may read without a prompt in the stricter modes
+```
+
+| Mode | Claude Code | Codex | Prompts |
+|---|---|---|---|
+| `full-access` (default) | `--permission-mode bypassPermissions` | `danger-full-access`, approval `never` | none |
+| `workspace-write` | `--permission-mode auto` | `workspace-write`, `on-request` unless `confirm_destructive = false` | some |
+| `approval-required` | `--permission-mode manual` | `workspace-write`, `on-request` | yes |
+| `read-only` | `--permission-mode plan`, Read/Grep/Glob only | `read-only` | none |
+
+`full-access` has no sandbox: the model can read, write, delete and run commands in any folder and reach the
+network, so `allow_network` and the roots do not limit it. The other modes keep the current project as the sandbox,
+plus `extra_write_roots`; in them `chat.dirs` become Claude `Read(...)` allow rules. `approval-required` routes
+provider approval requests to the UI. One-shot commands have no approval UI, so this mode becomes read-only there.
+In the sandboxed modes, Codex enforces `allow_network`; Claude's web tools are disabled when it is false.
+Path validation is defense in depth, not a replacement for the provider sandbox.
+
+Routing can downgrade after a self-contained topic change while short dependent follow-ups retain the previous
+task tier. Fresh quota readings below the configured reserve deprioritize that provider; missing or stale readings
+fall back to the existing usage-count ordering. `--eval-routing` accepts a JSONL holdout, rejects training leakage,
+and writes a hashed JSON report beside the runtime logs. A holdout is considered valid only when every label is
+explicitly verified.
 
 ## Runtime data and configuration
 
@@ -107,7 +143,7 @@ Runtime data is stored outside the installed package. On Windows the defaults ar
 | Files | Location |
 |---|---|
 | User configuration | `%APPDATA%\AI-Router\config.toml` |
-| Routes, labels, quota, reply style and learning state | `%LOCALAPPDATA%\AI-Router\logs\` |
+| Routes, chat history, labels, quota, reply style and learning state | `%LOCALAPPDATA%\AI-Router\logs\` |
 | Attachments | `%LOCALAPPDATA%\AI-Router\attachments\` |
 | Downloaded embedding models | `%LOCALAPPDATA%\AI-Router\models\` |
 

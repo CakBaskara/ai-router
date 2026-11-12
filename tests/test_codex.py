@@ -10,6 +10,7 @@ from textual.widgets import Static
 from airouter import config, dispatch
 from airouter.chat import Chat, CodexTurn
 from airouter.dispatch import CodexProc
+from airouter.failover import WorkspaceSnapshot
 from airouter.tui import ChatApp, Composer, Reply, UserBubble
 
 
@@ -81,6 +82,8 @@ class FakeServer:
 def server(monkeypatch):
     fake = FakeServer()
     monkeypatch.setattr("airouter.dispatch.subprocess.Popen", lambda *a, **kw: fake)
+    monkeypatch.setattr("airouter.chat.failover.workspace_snapshot",
+                        lambda root: WorkspaceSnapshot(root, (), ()))
     yield fake
     if fake.poll() is None:
         fake.kill()
@@ -196,7 +199,7 @@ def test_live_codex_resumes_saved_thread(server):
     proc = CodexProc("model-a", "medium", "saved-thread")
     resume = next(r for r in server.written if r.get("method") == "thread/resume")
     assert resume["params"]["threadId"] == "saved-thread"
-    assert resume["params"]["sandbox"] == "workspace-write" and proc.session == "thread-1"
+    assert resume["params"]["sandbox"] == "danger-full-access" and proc.session == "thread-1"
 
 
 def test_chat_records_injected_text_and_reuses_live_codex(server):
@@ -236,7 +239,7 @@ def test_codex_ui_injects_without_queue_and_updates_model_label(server):
                 if app.chat._codex and app.chat._codex.turn_id:
                     break
             assert app.chat._codex.turn_id == "turn-1"
-            assert "gpt-6.1-sol" in str(app.query_one("#model", Static).render())
+            assert str(app.query_one("#model", Static).render()) == "◆ auto · Otomatis ▾"
             app.query_one(Composer).insert("second")
             await pilot.press("enter")
             await pilot.pause(0.1)
@@ -359,3 +362,20 @@ def test_cancelled_command_approval_is_declined(server):
     response = next(r for r in server.written if r.get("id") == "approval")
     assert response["result"]["decision"] == "decline"
     assert result["code"] == 130
+
+
+@pytest.mark.parametrize("method", ["item/fileChange/requestApproval", "item/permissions/requestApproval"])
+def test_other_codex_approval_requests_reach_the_same_ui(server, method):
+    seen = []
+    proc = CodexProc("model-a", "low", None, approve=lambda params, cancelled: seen.append(params) or True)
+    worker, _, result, _ = ask_in_thread(proc)
+    wait_until(lambda: proc.turn_id == "turn-1")
+    server.emit({"id": "approval", "method": method, "params": {
+        "threadId": "thread-1", "turnId": "turn-1", "reason": "needs access"}})
+    wait_until(lambda: any(r.get("id") == "approval" for r in server.written))
+    response = next(r for r in server.written if r.get("id") == "approval")
+    assert response["result"]["decision"] == "accept"
+    assert seen[0]["requestMethod"] == method
+    server.finish()
+    worker.join(3)
+    assert result["code"] == 0

@@ -28,7 +28,8 @@ SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 EFFORT_NAMES = {"auto": "Otomatis", "minimal": "Minimal", "low": "Low", "medium": "Medium", "high": "High",
                 "xhigh": "Extra High", "max": "Max", "ultra": "Ultra"}
 PACKAGE = Path(__file__).parent
-MODULES = ("paths", "config", "attach", "dispatch", "learn", "codex", "chat", "tui")
+MODULES = ("paths", "config", "attach", "security", "failover", "routing_policy", "optimizer", "dispatch",
+           "learn", "history", "codex", "chat", "tui")
 
 
 def _watched() -> list[Path]:
@@ -82,11 +83,12 @@ DARK_MODERN = Theme(
 CSS = """
 Screen { background: ansi_default; }
 Screen .screen--selection { background: #264F78; }
-#top { height: 1; background: ansi_default; padding: 0 1; }
-#brand { width: auto; color: #CCCCCC; text-style: bold; }
-#cwd { width: 1fr; color: #9D9D9D; padding: 0 2; }
-#quota { width: auto; color: #9D9D9D; padding: 0 1; }
-#model { width: auto; color: #CCCCCC; padding: 0 1; }
+#top { height: 3; background: ansi_default; padding: 0 1; }
+#brand { width: auto; height: 3; color: #CCCCCC; text-style: bold; content-align: left middle; }
+#cwd { width: 1fr; height: 3; color: #9D9D9D; padding: 0 2; content-align: left middle; }
+#history, #quota { width: 7; height: 3; color: #D4D4D4; text-style: bold; content-align: center middle; }
+#history:hover, #quota:hover { color: #FFFFFF; background: #2B2B2B; }
+#model { width: auto; height: 3; color: #CCCCCC; padding: 0 1; content-align: left middle; }
 #model:hover { background: #2B2B2B; }
 #body { height: 1fr; background: ansi_default; }
 #sticky { visibility: hidden; height: 1; padding: 0 0 0 2; background: ansi_default; }
@@ -111,11 +113,11 @@ Info { color: #6E7681; text-style: italic; margin: 1 0 0 0; }
 #bottom { dock: bottom; height: auto; padding: 0 1 1 1; background: ansi_default; border-top: solid #2B2B2B; }
 #prompt { width: 2; color: #6E7681; background: ansi_default; }
 #inputrow { height: auto; background: ansi_default; }
-#clip { width: 4; padding: 0 1; color: #9D9D9D; background: ansi_default; }
-#clip:hover { background: #2B2B2B; }
-#stop { width: 4; padding: 0 1; color: #3C3C3C; background: ansi_default; }
-#stop.busy { color: #F85149; }
-#stop:hover { background: #2B2B2B; }
+#clip { width: 6; color: #CCCCCC; text-style: bold; content-align: center middle; background: ansi_default; }
+#clip:hover { color: #FFFFFF; background: #2B2B2B; }
+#stop { width: 6; color: #9D9D9D; text-style: bold; content-align: center middle; background: ansi_default; }
+#stop.busy { color: #FFFFFF; }
+#stop:hover { color: #FFFFFF; background: #2B2B2B; }
 #files { height: auto; color: #9D9D9D; background: ansi_default; display: none; }
 #files.has { display: block; }
 Composer { width: 1fr; height: auto; min-height: 1; max-height: 10; background: ansi_default; color: #CCCCCC; border: none; padding: 0; }
@@ -123,6 +125,8 @@ Composer:focus { border: none; }
 Composer .text-area--selection { background: #264F78; }
 Composer .text-area--cursor { color: #1F1F1F; background: #CCCCCC; text-style: none; }
 ModelPicker { align: center middle; background: #000000 50%; }
+HistoryPicker { align: center middle; background: #000000 50%; }
+QuotaPopup { align: right top; background: #000000 35%; }
 #effort-box { height: auto; border-top: solid #454545; padding: 1 0 0 0; }
 #effort-title { width: 1fr; color: #3794FF; text-style: bold; content-align: center middle; }
 #effort-model { width: 1fr; color: #6E7681; content-align: center middle; }
@@ -139,6 +143,13 @@ CommandApproval { align: center middle; background: #000000 50%; }
 #picker-tree > .tree--highlight { background: #2A2D2E; }
 #picker-tree > .tree--guides { color: #3C3C3C; }
 #picker-tree > .tree--guides-selected { color: #6E7681; }
+#history-picker { width: 76; height: 80%; border: round #454545; background: #202020; padding: 0 2; }
+#history-tree { height: 1fr; border: none; background: #202020; color: #CCCCCC; padding: 0; }
+#history-tree > .tree--cursor { background: #04395E; color: #FFFFFF; }
+#quota-popup { width: 54; height: auto; margin: 3 2 0 0; border: round #454545; background: #202020; padding: 1 2; }
+#quota-title { color: #CCCCCC; text-style: bold; }
+#quota-details { color: #CCCCCC; margin-top: 1; }
+#quota-hint { color: #6E7681; margin-top: 1; }
 """
 KEY_EVENT = 0x0001
 SHIFT_PRESSED = 0x0010
@@ -402,6 +413,16 @@ class ModelChip(Static):
         self.app.action_models()
 
 
+class HistoryButton(Static):
+    def on_click(self):
+        self.app.action_history()
+
+
+class QuotaButton(Static):
+    def on_click(self):
+        self.app.action_quota()
+
+
 class AttachButton(Static):
     def on_click(self):
         self.app.pick_files()
@@ -612,6 +633,64 @@ class ModelPicker(ModalScreen):
             self.query_one(EffortPanel).load(*self.app.effort_state())
 
 
+class HistoryPicker(ModalScreen):
+    BINDINGS = [Binding("escape", "close", "Tutup")]
+
+    def __init__(self, rows: list[dict]):
+        super().__init__()
+        self.rows = rows
+
+    def compose(self) -> ComposeResult:
+        tree = Tree("riwayat", id="history-tree")
+        tree.show_root = False
+        for row in self.rows:
+            when = str(row.get("updated_at", "-")).replace("T", " ")[:16]
+            title = str(row.get("title") or "Percakapan")
+            tree.root.add_leaf(Text.assemble((when, "dim"), "  ", title), data=row.get("id"))
+        with Vertical(id="history-picker"):
+            yield Static("Riwayat percakapan", id="picker-title")
+            yield tree
+            yield Static("â†‘â†“ pilih Â· Enter lanjutkan Â· Esc tutup", id="picker-hint")
+
+    def on_mount(self):
+        tree = self.query_one(Tree)
+        tree.focus()
+        tree.cursor_line = 0
+
+    def action_close(self):
+        self.dismiss(None)
+
+    def on_tree_node_selected(self, event: Tree.NodeSelected):
+        if event.node.data:
+            self.dismiss(event.node.data)
+
+
+class QuotaPopup(ModalScreen):
+    BINDINGS = [Binding("escape", "close", "Tutup")]
+
+    def __init__(self, line: str):
+        super().__init__()
+        self.line = line
+
+    @staticmethod
+    def details(line: str) -> str:
+        return line.replace("  │  ", "\n") if line else "Belum ada data kuota."
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="quota-popup"):
+            yield Static("Sisa token", id="quota-title")
+            yield Static(self.details(self.line), id="quota-details", markup=False)
+            yield Static("Diperbarui otomatis · Esc tutup", id="quota-hint")
+
+    def update_line(self, line: str):
+        self.line = line
+        if self.is_mounted:
+            self.query_one("#quota-details", Static).update(self.details(line))
+
+    def action_close(self):
+        self.dismiss(None)
+
+
 class CommandApproval(ModalScreen):
     BINDINGS = [Binding("escape", "reject", "Tolak")]
 
@@ -620,8 +699,15 @@ class CommandApproval(ModalScreen):
         self.params = params
 
     def compose(self) -> ComposeResult:
+        method = self.params.get("requestMethod", "")
+        title = {
+            "item/commandExecution/requestApproval": "Codex meminta izin menjalankan perintah",
+            "item/fileChange/requestApproval": "Codex meminta izin mengubah file",
+            "item/permissions/requestApproval": "Codex meminta perluasan izin",
+            "can_use_tool": "Claude meminta izin menggunakan alat",
+        }.get(method, "Provider meminta izin")
         with Vertical(id="approval"):
-            yield Static("Codex meminta izin menjalankan perintah di luar sandbox")
+            yield Static(title)
             with VerticalScroll(id="approval-details"):
                 yield Static(json.dumps(self.params, ensure_ascii=False, indent=2), markup=False)
             with Horizontal():
@@ -651,6 +737,8 @@ class TuiUI:
         ready = threading.Event()
         decision = []
         screen = CommandApproval(params)
+        timeout = float(self.app.chat.cfg.get("security", {}).get("approval_timeout_seconds", 300))
+        deadline = time.monotonic() + max(0, timeout)
 
         def answered(value):
             decision.append(bool(value))
@@ -658,7 +746,7 @@ class TuiUI:
 
         self._call(self.app.push_screen, screen, answered)
         while not ready.wait(0.1):
-            if cancelled():
+            if cancelled() or time.monotonic() >= deadline:
                 self._call(screen.dismiss, False)
                 return False
         return decision[0]
@@ -690,6 +778,7 @@ class ChatApp(App):
         Binding("escape", "cancel", "Batal"),
         Binding("ctrl+o", "models", "Model"),
         Binding("ctrl+e", "effort", "Effort", priority=True),
+        Binding("ctrl+h", "history", "Riwayat"),
         Binding("ctrl+n", "new", "Baru"),
         Binding("ctrl+q", "quit", "Keluar"),
     ]
@@ -719,8 +808,9 @@ class ChatApp(App):
         with Horizontal(id="top"):
             yield Static("✻ ai", id="brand")
             yield Static(os.getcwd(), id="cwd", markup=False)
-            yield Static("", id="quota", markup=False)
-            yield ModelChip("", id="model", markup=False)
+            yield HistoryButton("⟲", id="history", markup=False)
+            yield QuotaButton("◎", id="quota", markup=False)
+            yield ModelChip("◆ auto · Otomatis ▾", id="model", markup=False)
         with Vertical(id="body"):
             with Horizontal(classes="arrows"):
                 yield ScrollButton("▲", -1, id="up")
@@ -743,7 +833,6 @@ class ChatApp(App):
         self._sticky = self.query_one("#sticky")
         self._sticky_who = self.query_one("#sticky-who", Static)
         self._sticky_why = self.query_one("#sticky-why", Static)
-        self._quota_w = self.query_one("#quota", Static)
         self._model_w = self.query_one("#model", Static)
         self._stop_w = self.query_one("#stop", Static)
         self.register_theme(DARK_MODERN)
@@ -756,8 +845,8 @@ class ChatApp(App):
                     self._mount(Reply("sebelumnya", "", text, done=True))
             self.add_info("Kode diperbarui dan dimuat ulang; percakapan tetap berlanjut.")
         else:
-            self.add_info("Edit dan perintah dijalankan otomatis (mode auto). "
-                          "Ctrl+O pilih model dan effort · Esc hentikan jawaban · /help perintah")
+            self.add_info(f"Keamanan {self.chat.policy.mode.value}. "
+                          "Ctrl+O pilih model dan effort · Ctrl+H riwayat · Esc hentikan jawaban · /help perintah")
         self.query_one("#log", VerticalScroll).anchor()
         self.refresh_status()
         composer = self.query_one(Composer)
@@ -841,8 +930,8 @@ class ChatApp(App):
         if line == self._quota_shown:
             return
         self._quota_shown = line
-        if self._quota_w:
-            self._quota_w.update(line)
+        if isinstance(self.screen, QuotaPopup):
+            self.screen.update_line(line)
 
     @work(thread=True)
     def warm_classifier(self):
@@ -850,10 +939,7 @@ class ChatApp(App):
             learn.warm_encoder(self.chat.ui.info)
 
     def refresh_status(self):
-        queued = f"  ·  antre {len(self.queue)}" if self.queue else ""
-        model = self.reply.model if self.busy and self.reply else self.chat.label()
-        effort = self.reply_effort if self.busy and self.reply else self.chat.pinned_effort
-        self._model_w.update(f"◆ {model} · {EFFORT_NAMES.get(effort or 'auto', effort)} ▾{queued}")
+        self._model_w.update("◆ auto · Otomatis ▾")
         self._quota_shown = None
         self.refresh_quota()
 
@@ -1045,6 +1131,11 @@ class ChatApp(App):
             self.action_models()
         elif name == "/new":
             self.action_new()
+        elif name == "/history" and not text.partition(" ")[2].strip():
+            self.action_history()
+        elif name == "/history":
+            if self.chat.history_command(text.partition(" ")[2].strip()):
+                self.show_loaded_history()
         elif name == "/help":
             self.add_info(HELP)
         elif name == "/reload":
@@ -1085,6 +1176,45 @@ class ChatApp(App):
         self.chat.reset()
         self.query_one("#log", VerticalScroll).remove_children()
         self.add_info("Percakapan baru.")
+        self.refresh_status()
+        self.chat.prewarm()
+
+    def action_history(self):
+        if self.busy:
+            self.notify("Hentikan jawaban sebelum berpindah percakapan.", severity="warning")
+            return
+        rows = self.chat.history_entries()
+        if not rows:
+            self.notify("Belum ada riwayat percakapan.")
+            return
+        self.push_screen(HistoryPicker(rows), self.load_history)
+
+    def action_quota(self):
+        if isinstance(self.screen, QuotaPopup):
+            return
+        self.push_screen(QuotaPopup(config.quota_line()))
+
+    def load_history(self, history_id: str | None):
+        if not history_id:
+            return
+        if not self.chat.load_history(history_id):
+            self.notify("Riwayat tidak dapat dimuat.", severity="error")
+            return
+        self.show_loaded_history()
+
+    def show_loaded_history(self):
+        self.queue.clear()
+        self.attachments.clear()
+        self.refresh_files()
+        self.query_one(Composer).clear()
+        self.query_one("#log", VerticalScroll).remove_children()
+        for role, text in self.chat.transcript:
+            if role == "User":
+                self._bubble(text)
+            else:
+                self._mount(Reply("sebelumnya", "", text, done=True))
+        self.add_info("Percakapan lama dilanjutkan.")
+        self.query_one("#log", VerticalScroll).anchor()
         self.refresh_status()
         self.chat.prewarm()
 

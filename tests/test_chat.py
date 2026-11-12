@@ -97,7 +97,7 @@ def test_codex_turn_failed():
     assert turn.error == "usage limit"
 
 
-def test_tier_only_goes_up():
+def test_tier_can_drop_for_a_new_self_contained_topic():
     c = chat()
     run, _ = fake_runner([(0, claude_reply("a")), (0, claude_reply("b")), (0, claude_reply("c"))])
     c.send("apa itu LC3", runner=run)
@@ -105,7 +105,26 @@ def test_tier_only_goes_up():
     c.send("cari root cause frame hilang", runner=run)
     assert c.tier == "heavy"
     c.send("apa itu ISO", runner=run)
+    assert c.tier == "light"
+
+
+def test_dependent_follow_up_keeps_the_previous_task_tier():
+    c = chat()
+    run, _ = fake_runner([(0, claude_reply("a")), (0, claude_reply("b"))])
+    c.send("refactor parser audio yang rusak", runner=run)
     assert c.tier == "heavy"
+    c.send("lanjutkan dan perbaiki test tadi", runner=run)
+    assert c.tier == "heavy"
+    assert c.last_routing.related_to_previous
+    assert c.last_routing.turn_tier == "medium"
+
+
+def test_short_error_follow_up_inherits_context():
+    c = chat()
+    run, _ = fake_runner([(0, claude_reply("a")), (0, claude_reply("b"))])
+    c.send("fix fungsi parser ini", runner=run)
+    c.send("error-nya masih sama", runner=run)
+    assert c.tier == "medium" and c.last_routing.related_to_previous
 
 
 def test_new_resets_tier_and_sessions():
@@ -133,18 +152,17 @@ def test_same_provider_resumes_without_recap():
     assert prompt == learn.style_note()[1] + "apa itu ISO"
 
 
-def test_fallback_to_codex_sends_recap_and_sticks():
+def test_dispatched_failure_stops_before_fallback_and_manual_switch_recaps():
     c = chat()
-    run, calls = fake_runner([(0, claude_reply("jawab satu")), (1, []), (0, codex_reply("jawab dua")),
-                              (0, codex_reply("jawab tiga"))])
+    run, calls = fake_runner([(0, claude_reply("jawab satu")), (1, []), (0, codex_reply("jawab dua"))])
     c.send("apa itu LC3", runner=run)
-    c.send("apa itu ISO", runner=run)
-    assert c.provider == "codex"
-    prompt = calls[2][1]
-    assert "User: apa itu LC3" in prompt and "Assistant: jawab satu" in prompt and prompt.endswith("apa itu ISO")
+    assert c.send("apa itu ISO", runner=run) == 1
+    assert c.provider == "claude" and len(calls) == 2
+    c.command("/codex")
     c.send("apa itu USB", runner=run)
-    cmd, prompt = calls[3]
-    assert "resume" in cmd and prompt == learn.style_note()[1] + "apa itu USB"
+    prompt = calls[2][1]
+    assert "User: apa itu LC3" in prompt and "Assistant: jawab satu" in prompt
+    assert "[gagal:" in prompt and prompt.endswith("apa itu USB")
 
 
 def test_switch_back_recaps_only_unseen_turns():
@@ -171,14 +189,16 @@ def test_recap_truncates_long_entries():
     assert "[...]" in text and len(text) < 2500
 
 
-def test_chat_cmd_codex_resume_keeps_write_sandbox():
+def test_chat_cmd_codex_resume_keeps_full_access_by_default():
     cmd = dispatch.chat_cmd("codex", "m", "low", "t1")
-    assert cmd[-2:] == ["t1", "-"] and 'sandbox_mode="workspace-write"' in cmd
+    assert cmd[-2:] == ["t1", "-"] and 'sandbox_mode="danger-full-access"' in cmd
+    assert 'approval_policy="never"' in cmd
 
 
-def test_chat_cmd_claude_runs_in_auto_mode():
+def test_chat_cmd_claude_bypasses_permissions_by_default():
     cmd = dispatch.chat_cmd("claude", "sonnet", "medium", None)
-    assert cmd[cmd.index("--permission-mode") + 1] == "auto" and "--resume" not in cmd
+    assert cmd[cmd.index("--permission-mode") + 1] == "bypassPermissions"
+    assert "--disallowedTools" not in cmd and "--resume" not in cmd
 
 
 def test_codex_with_model_pins_exact_model():
@@ -631,7 +651,7 @@ def test_catalog_lists_every_provider():
     assert {"claude", "codex"} <= providers
 
 
-def test_empty_answer_falls_back_to_next_provider():
+def test_empty_answer_does_not_retry_after_dispatch():
     c = Chat(CFG, use_llm=False)
     calls = []
 
@@ -646,6 +666,22 @@ def test_empty_answer_falls_back_to_next_provider():
 
     c.command("/model light")
     c.pinned_tier = "light"
+    assert c.send("halo", runner=runner) == 1
+    assert len(calls) == 1 and c.provider is None and c.transcript[-1][1].startswith("[gagal:")
+
+
+def test_spawn_failure_can_fall_back_before_dispatch():
+    c = Chat(CFG, use_llm=False)
+    calls = []
+
+    def runner(cmd, prompt, turn, show, started):
+        calls.append(cmd)
+        if len(calls) == 1:
+            raise FileNotFoundError("provider executable missing")
+        for event in codex_reply("ok"):
+            turn.feed(event)
+        return 0
+
     assert c.send("halo", runner=runner) == 0
     assert len(calls) == 2 and c.provider == "codex" and c.transcript[-1] == ("Assistant", "ok")
 

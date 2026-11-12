@@ -6,6 +6,7 @@ from PIL import Image
 
 from airouter import attach, config, dispatch
 from airouter.chat import Chat, image_blocks, with_files
+from airouter.security import Mode, SecurityPolicy
 from airouter.tui import ChatApp, Composer, UserBubble
 
 CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing", "loop")}, "providers": ["claude", "codex"]}
@@ -56,16 +57,18 @@ def test_cmd_flags_per_provider(tmp_path):
     codex = dispatch.chat_cmd("codex", "m", "low", None, [img, txt], "D:/att")
     assert codex[codex.index("-i") + 1] == str(img) and codex.count("-i") == 1
     claude = dispatch.chat_cmd("claude", "opus", "high", None, attach_dir="D:/att")
-    assert str(Path("D:/att").resolve()) in claude
+    assert str(Path("D:/att").resolve()) not in claude
 
 
-def test_every_provider_gets_the_same_roots(monkeypatch):
-    monkeypatch.setattr(dispatch.config, "load", lambda: {"chat": {"dirs": ["D:/extra"]}})
-    want = dispatch.chat_roots("D:/att")
-    assert str(Path("D:/extra").resolve()) in want
-    claude = dispatch.chat_cmd("claude", "m", "low", None, attach_dir="D:/att")
+def test_every_provider_gets_only_explicit_write_roots(tmp_path):
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    policy = SecurityPolicy(Mode.APPROVAL_REQUIRED, tmp_path, extra_write_roots=(extra,))
+    want = dispatch.chat_roots(policy)
+    assert want == [str(extra.resolve())]
+    claude = dispatch.chat_cmd("claude", "m", "low", None, policy=policy)
     assert [claude[i + 1] for i, a in enumerate(claude) if a == "--add-dir"] == want
-    codex = dispatch.chat_cmd("codex", "m", "low", None, attach_dir="D:/att")
+    codex = dispatch.chat_cmd("codex", "m", "low", None, policy=policy)
     assert json.dumps(want) in " ".join(codex)
 
 
@@ -154,11 +157,13 @@ def test_clip_button_attaches_picked_files(monkeypatch, tmp_path):
         app = make_app()
         monkeypatch.setattr(attach, "pick_files", lambda: [png(tmp_path / "a.png"), png(tmp_path / "b.png")])
         async with app.run_test(size=(100, 30)) as pilot:
+            clip = app.query_one("#clip")
+            assert str(clip.render()) == "📎" and clip.region.width == 6
             await pilot.click("#clip")
             for _ in range(40):
                 await pilot.pause(0.05)
                 if app.attachments:
                     break
             assert [f.name.split("-", 2)[-1] for f in app.attachments] == ["a.png", "b.png"]
-            assert app.query_one("#clip").region.right <= 100
+            assert clip.region.right <= 100
     asyncio.run(go())

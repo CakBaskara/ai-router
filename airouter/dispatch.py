@@ -8,7 +8,8 @@ import threading
 import urllib.request
 from pathlib import Path
 
-from . import attach, config
+from . import __version__, attach, config
+from .security import Mode, SecurityPolicy
 
 CLASSIFIER_PROMPT = (
     "Classify the user's request by how capable a model must be to answer it well. "
@@ -47,52 +48,89 @@ def codex_cmd() -> list[str]:
     return _node_script("codex", "@openai", "codex", "bin", "codex.js")
 
 
-def build(provider: str, model: str, effort: str, prompt: str, interactive: bool) -> tuple[list[str], str | None]:
+def build(provider: str, model: str, effort: str, prompt: str, interactive: bool,
+          policy: SecurityPolicy | None = None) -> tuple[list[str], str | None]:
+    policy = policy or SecurityPolicy.from_config(config.load())
+    if not interactive and policy.mode is Mode.APPROVAL_REQUIRED:
+        policy = SecurityPolicy(Mode.READ_ONLY, policy.workspace, False, (), policy.read_roots, True)
     if provider == "claude":
-        base = claude_cmd() + ["--model", model, "--effort", effort]
+        base = claude_cmd() + ["--model", model, "--effort", effort] + _claude_security(policy)
         if interactive:
             return base + ([prompt] if prompt else []), None
         return base + ["-p", "--no-session-persistence"], prompt
     if provider == "codex":
         effort_cfg = ["-c", f"model_reasoning_effort={effort}"]
+        roots = [arg for root in policy.extra_write_roots for arg in ("--add-dir", str(root))]
         if interactive:
-            return codex_cmd() + ["-m", model] + effort_cfg + ([prompt] if prompt else []), None
+            security_args = ["-s", policy.sandbox, "-a", policy.approval_policy,
+                             "-C", str(policy.workspace)] + roots
+            return codex_cmd() + ["-m", model] + effort_cfg + security_args + ([prompt] if prompt else []), None
+        security_args = ["-s", policy.sandbox, "-C", str(policy.workspace),
+                         "-c", f'approval_policy="{policy.approval_policy}"'] + roots
         return codex_cmd() + ["exec", "-m", model] + effort_cfg + [
-            "--skip-git-repo-check", "--ephemeral", "-s", "read-only", "-"], prompt
+            "--skip-git-repo-check", "--ephemeral"] + security_args + ["-"], prompt
     raise ValueError(f"unknown provider: {provider}")
 
 
-def chat_roots(attach_dir=None):
-    roots = [str(Path(d).expanduser().resolve()) for d in config.load().get("chat", {}).get("dirs", [])]
-    if attach_dir:
-        roots.append(str(Path(attach_dir).resolve()))
-    return list(dict.fromkeys(roots))
+def _claude_security(policy: SecurityPolicy) -> list[str]:
+    if policy.mode is Mode.READ_ONLY:
+        args = ["--permission-mode", "plan", "--permission-prompts", "none", "--restricted",
+                "--strict-mcp-config", "--tools", "Read,Grep,Glob"]
+        return args + [arg for root in policy.read_roots for arg in ("--add-dir", str(root))]
+    mode = {Mode.FULL_ACCESS: "bypassPermissions", Mode.APPROVAL_REQUIRED: "manual"}.get(policy.mode, "auto")
+    args = ["--permission-mode", mode, "--permission-prompts", "host"]
+    if not policy.network_allowed:
+        args += ["--disallowedTools", "WebFetch,WebSearch"]
+    if policy.mode is Mode.FULL_ACCESS:
+        roots = dict.fromkeys(policy.extra_write_roots + policy.read_roots)
+        return args + [arg for root in roots for arg in ("--add-dir", str(root))]
+    if policy.read_roots:
+        args += ["--allowedTools", ",".join(_read_rule(root) for root in policy.read_roots)]
+    return args + [arg for root in policy.extra_write_roots for arg in ("--add-dir", str(root))]
 
 
-def codex_server_cmd():
-    roots = json.dumps(chat_roots(str(attach.folder())))
-    return codex_cmd() + ["app-server", "--listen", "stdio://", "-c", 'sandbox_mode="workspace-write"',
-                          "-c", f"sandbox_workspace_write.writable_roots={roots}"]
+def _read_rule(root: Path) -> str:
+    path = root.as_posix()
+    if root.drive:
+        path = "/" + root.drive[0].lower() + path[len(root.drive):]
+    return f"Read(/{path.rstrip('/')}/**)"
+
+
+def chat_roots(policy: SecurityPolicy | None = None):
+    policy = policy or SecurityPolicy.from_config(config.load())
+    return [str(root) for root in policy.extra_write_roots]
+
+
+def codex_server_cmd(policy: SecurityPolicy | None = None):
+    policy = policy or SecurityPolicy.from_config(config.load())
+    roots = json.dumps(chat_roots(policy))
+    return codex_cmd() + ["app-server", "--listen", "stdio://", "-c", f'sandbox_mode="{policy.sandbox}"',
+                          "-c", f'approval_policy="{policy.approval_policy}"',
+                          "-c", f"sandbox_workspace_write.writable_roots={roots}",
+                          "-c", f"sandbox_workspace_write.network_access={str(policy.network_allowed).lower()}"]
 
 
 def chat_cmd(provider: str, model: str, effort: str, session: str | None, files=(),
-             attach_dir: str | None = None) -> list[str]:
+             attach_dir: str | None = None, policy: SecurityPolicy | None = None) -> list[str]:
+    policy = policy or SecurityPolicy.from_config(config.load())
     images = [str(f) for f in files if attach.is_image(Path(f))]
     if provider == "claude":
         cmd = claude_cmd() + [
-            "-p", "--model", model, "--effort", effort, "--permission-mode", "auto",
+            "-p", "--model", model, "--effort", effort, *_claude_security(policy),
             "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
             "--include-partial-messages", "--replay-user-messages"]
-        cmd += [arg for root in chat_roots(attach_dir) for arg in ("--add-dir", root)]
         return cmd + (["--resume", session] if session else [])
     if provider == "codex":
         common = ["-m", model, "-c", f"model_reasoning_effort={effort}", "--json", "--skip-git-repo-check"]
         common += [arg for img in images for arg in ("-i", img)]
-        roots = json.dumps(chat_roots(attach_dir))
+        roots = json.dumps(chat_roots(policy))
         common += ["-c", f"sandbox_workspace_write.writable_roots={roots}"]
+        common += ["-c", f"sandbox_workspace_write.network_access={str(policy.network_allowed).lower()}"]
         if session:
-            return codex_cmd() + ["exec", "resume"] + common + ["-c", 'sandbox_mode="workspace-write"', session, "-"]
-        return codex_cmd() + ["exec"] + common + ["-s", "workspace-write", "-"]
+            common += ["-c", f'approval_policy="{policy.approval_policy}"']
+            return codex_cmd() + ["exec", "resume"] + common + ["-c", f'sandbox_mode="{policy.sandbox}"', session, "-"]
+        common += ["-c", f'approval_policy="{policy.approval_policy}"']
+        return codex_cmd() + ["exec"] + common + ["-s", policy.sandbox, "-C", str(policy.workspace), "-"]
     raise ValueError(f"unknown provider: {provider}")
 
 
@@ -102,7 +140,10 @@ REVIEW_TOOLS = "Read,Grep,Glob,Bash(git diff:*),Bash(git status:*),Bash(git log:
 def review_cmd(provider: str, model: str, effort: str) -> list[str]:
     if provider == "claude":
         cmd = claude_cmd() + [
-            "-p", "--model", model, "--effort", effort, "--no-session-persistence", "--allowedTools", REVIEW_TOOLS,
+            "-p", "--model", model, "--effort", effort, "--no-session-persistence",
+            "--permission-mode", "plan", "--permission-prompts", "none", "--restricted",
+            "--tools", "Read,Grep,Glob,Bash", "--allowedTools", REVIEW_TOOLS,
+            "--disallowedTools", "Edit,Write,WebFetch,WebSearch",
             "--output-format", "stream-json", "--verbose", "--include-partial-messages"]
         return cmd + [arg for root in chat_roots() for arg in ("--add-dir", root)]
     if provider == "codex":
@@ -220,12 +261,20 @@ def read_claude_usage(timeout: float = 15) -> dict:
         return {}
 
 
+APPROVAL_METHODS = {
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "item/permissions/requestApproval",
+}
+
+
 class CodexProc:
-    def __init__(self, model, effort, session, approve=None):
-        self.key = (model, effort)
+    def __init__(self, model, effort, session, approve=None, policy: SecurityPolicy | None = None):
+        self.policy = policy or SecurityPolicy.from_config(config.load())
+        self.key = (model, effort, self.policy.key)
         self.approve = approve
         self.session = session
-        self.proc = subprocess.Popen(codex_server_cmd(), stdin=subprocess.PIPE,
+        self.proc = subprocess.Popen(codex_server_cmd(self.policy), stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.lock = threading.RLock()
         self.events = queue.Queue()
@@ -241,9 +290,10 @@ class CodexProc:
         threading.Thread(target=self._drain, daemon=True).start()
         try:
             self._rpc("initialize", {"clientInfo": {"name": "ai-router", "title": "ai-router",
-                                                   "version": "0.1.0"}})
+                                                   "version": __version__}})
             self._write({"method": "initialized", "params": {}})
-            params = {"model": model, "cwd": os.getcwd(), "sandbox": "workspace-write",
+            params = {"model": model, "cwd": str(self.policy.workspace), "sandbox": self.policy.sandbox,
+                      "approvalPolicy": self.policy.approval_policy,
                       "config": {"model_reasoning_effort": effort}}
             if session:
                 params["threadId"] = session
@@ -302,7 +352,7 @@ class CodexProc:
                         else:
                             self.events.put(message)
                 elif "id" in message:
-                    if message.get("method") == "item/commandExecution/requestApproval":
+                    if message.get("method") in APPROVAL_METHODS:
                         self.events.put(message)
                     else:
                         self._write({"id": message["id"], "error": {
@@ -360,12 +410,13 @@ class CodexProc:
                 if message is None:
                     raise OSError(self.errors[-1] if self.errors else "Codex app-server disconnected")
                 if "id" in message:
-                    if message.get("method") == "item/commandExecution/requestApproval":
+                    if message.get("method") in APPROVAL_METHODS:
                         params = message.get("params", {})
+                        shown = {**params, "requestMethod": message.get("method")}
                         allowed = (params.get("threadId") == self.session
                                    and params.get("turnId") == self.turn_id
                                    and not self.cancelled and self.approve
-                                   and self.approve(params, lambda: self.cancelled or not self.alive()))
+                                   and self.approve(shown, lambda: self.cancelled or not self.alive()))
                         self._write({"id": message["id"], "result": {
                             "decision": "accept" if allowed and not self.cancelled else "decline"}})
                         continue
@@ -473,7 +524,7 @@ def read_limits(timeout: float = 20) -> dict:
     def talk():
         try:
             send({"id": 1, "method": "initialize", "params": {"clientInfo": {
-                "name": "ai-router", "title": "ai-router", "version": "0.1.0"}}})
+                "name": "ai-router", "title": "ai-router", "version": __version__}}})
             reply(1)
             send({"method": "initialized", "params": {}})
             send({"id": 2, "method": "account/rateLimits/read", "params": {}})

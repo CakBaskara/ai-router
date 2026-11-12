@@ -9,13 +9,17 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import attach, config, dispatch, learn
+from . import attach, config, dispatch, failover, history, learn, optimizer
 from .dispatch import CodexProc
 from .config import log, say, usage_today
 from .learn import TIERS, classify
+from .routing_policy import RoutingDecision, decide
+from .security import SecurityPolicy
 
 HELP = (
     "/new                      percakapan baru\n"
+    "/history                  buka atau tampilkan riwayat percakapan\n"
+    "/history <nomor>          lanjutkan percakapan lama\n"
     "/model                    tampilkan tier, provider, model\n"
     "/model light|medium|heavy kunci tier\n"
     "/model auto               kembali ke routing otomatis\n"
@@ -51,7 +55,7 @@ REVISE_PROMPT = (
     "about the review, because the user reads only this one."
 )
 VERDICT = re.compile(r"^\W*(LOLOS|REVISI)\b\W*$", re.M | re.I)
-STATE = ("tier", "provider", "model", "sessions", "synced", "transcript", "last_reply",
+STATE = ("history_id", "tier", "provider", "model", "sessions", "synced", "transcript", "last_reply",
          "pinned_provider", "pinned_tier", "pinned_model", "pinned_effort")
 RECAP_ENTRIES = 12
 RECAP_CHARS = 2000
@@ -147,6 +151,7 @@ class ClaudeTurn(Segments):
         self.session = None
         self.reply = []
         self.usage = ""
+        self.usage_data = {}
         self.error = None
         self.parts = []
 
@@ -178,6 +183,8 @@ class ClaudeTurn(Segments):
             u = ev.get("usage", {})
             cached = u.get("cache_read_input_tokens", 0)
             total = u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0) + cached
+            self.usage_data = {"input_tokens": total, "cached_input_tokens": cached,
+                               "output_tokens": u.get("output_tokens", 0)}
             self.usage = f"in {_k(total)} (cache {_k(cached)}) · out {_k(u.get('output_tokens', 0))}"
             if ev.get("is_error"):
                 self.error = _short(ev.get("result") or ev.get("subtype") or "error", 300)
@@ -192,6 +199,7 @@ class CodexTurn(Segments):
         self.session = None
         self.reply = []
         self.usage = ""
+        self.usage_data = {}
         self.error = None
         self.parts = []
         self.streamed = set()
@@ -235,6 +243,9 @@ class CodexTurn(Segments):
             return "note", _short(item.get("message", ""), 200)
         elif kind == "turn.completed":
             u = ev.get("usage", {})
+            self.usage_data = {"input_tokens": u.get("input_tokens", 0),
+                               "cached_input_tokens": u.get("cached_input_tokens", 0),
+                               "output_tokens": u.get("output_tokens", 0)}
             self.usage = (f"in {_k(u.get('input_tokens', 0))} (cache {_k(u.get('cached_input_tokens', 0))})"
                           f" · out {_k(u.get('output_tokens', 0))}")
         elif kind == "turn.failed":
@@ -287,12 +298,9 @@ def image_blocks(files) -> list[dict]:
 TURNS = {"claude": ClaudeTurn, "codex": CodexTurn}
 
 
-def lineup(cfg: dict, sticky: str | None = None, usage: dict | None = None) -> list[str]:
-    providers = sorted(cfg["providers"], key=lambda p: (usage or {}).get(p, 0))
-    if sticky in providers:
-        providers.remove(sticky)
-        providers.insert(0, sticky)
-    return providers
+def lineup(cfg: dict, sticky: str | None = None, usage: dict | None = None,
+           quota: dict | None = None) -> list[str]:
+    return optimizer.rank_providers(cfg, sticky, usage, quota)
 
 
 class Printer:
@@ -372,10 +380,11 @@ def stream(cmd: list[str], prompt: str, turn, show, started=None) -> int:
 
 
 class ClaudeProc:
-    def __init__(self, model: str, effort: str, session: str | None):
-        self.key = (model, effort)
+    def __init__(self, model: str, effort: str, session: str | None, policy: SecurityPolicy, approve=None):
+        self.key = (model, effort, policy.key)
         self.session = session
-        cmd = dispatch.chat_cmd("claude", model, effort, session, attach_dir=str(attach.folder()))
+        self.approve = approve
+        cmd = dispatch.chat_cmd("claude", model, effort, session, policy=policy)
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.errors = []
         self.lock = threading.Lock()
@@ -393,8 +402,34 @@ class ClaudeProc:
     def _write(self, prompt: str, files=()):
         content = [{"type": "text", "text": prompt}] + image_blocks(files)
         msg = {"type": "user", "message": {"role": "user", "content": content}}
-        self.proc.stdin.write((json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8"))
+        self._write_message(msg)
+
+    def _write_message(self, message: dict):
+        self.proc.stdin.write((json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8"))
         self.proc.stdin.flush()
+
+    def _permission(self, event: dict):
+        request = event.get("request") or {}
+        request_id = event.get("request_id")
+        if not request_id:
+            return
+        if request.get("subtype") != "can_use_tool":
+            self._write_message({"type": "control_response", "response": {
+                "subtype": "error", "request_id": request_id, "error": "Unsupported control request"}})
+            return
+        shown = {
+            "requestMethod": "can_use_tool",
+            "tool": request.get("tool_name"),
+            "input": request.get("input") or {},
+            "reason": request.get("decision_reason"),
+            "title": request.get("title"),
+            "description": request.get("description"),
+        }
+        allowed = bool(self.approve and self.approve(shown, lambda: not self.alive()))
+        answer = {"behavior": "allow"} if allowed and self.alive() else {
+            "behavior": "deny", "message": "Ditolak oleh pengguna atau UI tidak tersedia"}
+        self._write_message({"type": "control_response", "response": {
+            "subtype": "success", "request_id": request_id, "response": answer}})
 
     def ask(self, prompt: str, turn, show, files=()) -> int:
         try:
@@ -405,6 +440,9 @@ class ClaudeProc:
                 try:
                     ev = json.loads(raw.decode("utf-8", "replace"))
                 except json.JSONDecodeError:
+                    continue
+                if ev.get("type") == "control_request":
+                    self._permission(ev)
                     continue
                 if ev.get("isReplay"):
                     self.acked += 1
@@ -462,13 +500,18 @@ class Chat:
         self._live = None
         self._input_lock = threading.RLock()
         self._cancelled = False
+        self._attempt_dispatched = False
         self.injected = []
         self.carry = {}
         self.use_llm = use_llm and cfg["classifier"].get("llm_fallback", False)
+        self.policy = SecurityPolicy.from_config(cfg)
         self.reset()
 
     def reset(self):
+        if getattr(self, "transcript", None):
+            self.remember()
         self.close()
+        self.history_id = history.new_id()
         self.tier = None
         self.provider = None
         self.model = None
@@ -476,9 +519,53 @@ class Chat:
         self.synced = {}
         self.transcript = []
         self.last_reply = None
+        self.last_routing = None
+
+    def persistent_state(self) -> dict:
+        return {k: getattr(self, k) for k in STATE}
+
+    def remember(self) -> bool:
+        return history.save(self.persistent_state())
+
+    def history_entries(self) -> list[dict]:
+        return history.entries()
+
+    def load_history(self, history_id: str) -> bool:
+        state = history.load(history_id)
+        if not state:
+            return False
+        self.remember()
+        self.close()
+        self.restore(state)
+        return True
+
+    def history_command(self, arg: str = "") -> bool:
+        rows = self.history_entries()
+        if not arg:
+            if not rows:
+                self.ui.info("belum ada riwayat percakapan")
+                return False
+            shown = [f"{i:>2}  {row.get('updated_at', '-')[:16].replace('T', ' ')}  {row.get('title', '-') }"
+                     for i, row in enumerate(rows, 1)]
+            self.ui.info("\n".join(shown) + "\nlanjutkan: /history <nomor>")
+            return False
+        row = None
+        if arg.isdigit() and 1 <= int(arg) <= len(rows):
+            row = rows[int(arg) - 1]
+        else:
+            matches = [item for item in rows if item.get("id", "").startswith(arg)]
+            if len(matches) == 1:
+                row = matches[0]
+        if not row or not self.load_history(row["id"]):
+            self.ui.info(f"riwayat '{arg}' tidak ditemukan")
+            return False
+        self.ui.info(f"riwayat dimuat: {row.get('title', 'percakapan')}")
+        return True
 
     def route(self, msg: str) -> tuple[str, list[str], bool]:
         if self.pinned_tier:
+            self.last_routing = RoutingDecision(self.pinned_tier, self.pinned_tier, self.pinned_tier,
+                                                bool(self.transcript), f"dikunci {self.pinned_tier}")
             return self.pinned_tier, ["dikunci"], False
         v = classify(msg, self.cfg.get("rules", {}))
         tier, reasons, llm = v.tier, list(v.reasons), False
@@ -490,21 +577,21 @@ class Chat:
                 reasons.append(why)
             if guess and not llm and self.use_llm and learn.audit_due(self.cfg):
                 threading.Thread(target=learn.audit, args=(msg, guess, self.cfg), daemon=True).start()
-        floor = self.cfg.get("chat", {}).get("min_tier")
-        if floor and higher(floor, tier) != tier:
-            reasons.append(f"minimum chat {floor}")
-            tier = floor
-        if self.tier and higher(self.tier, tier) != tier:
-            reasons.append(f"tetap {self.tier}")
-            tier = self.tier
-        return tier, reasons, llm
+        floor = self.cfg.get("chat", {}).get("min_tier") or "light"
+        previous = next((text for role, text in reversed(self.transcript) if role == "User"), None)
+        decision = decide(tier, self.tier, msg, previous, v.ambiguous, floor)
+        self.last_routing = decision
+        if decision.reason not in reasons and (decision.related_to_previous or decision.effective_tier != tier):
+            reasons.append(decision.reason)
+        return decision.effective_tier, reasons, llm
 
     def order(self, tier: str) -> list[str]:
         if self.pinned_provider:
             return [self.pinned_provider]
-        return lineup(self.cfg, self.provider, usage_today())
+        return lineup(self.cfg, self.provider, usage_today(), config.load_quota())
 
     def _started(self, proc):
+        self._attempt_dispatched = True
         self._proc = proc
         if self._cancelled:
             proc.kill()
@@ -550,12 +637,14 @@ class Chat:
         self.ui.info(f"effort dikunci: {level}" if level else "effort otomatis (ikut tier)")
 
     def _claude_proc(self, route: dict) -> ClaudeProc:
-        key, session = (route["model"], route["effort"]), self.sessions.get("claude")
+        key = (route["model"], route["effort"], self.policy.key)
+        session = self.sessions.get("claude")
         p = self._claude
         if p and p.alive() and p.key == key and p.session == session:
             return p
         self.close()
-        self._claude = ClaudeProc(route["model"], route["effort"], session)
+        self._claude = ClaudeProc(route["model"], route["effort"], session, self.policy,
+                                  getattr(self.ui, "approve", None))
         return self._claude
 
     def prewarm(self):
@@ -569,15 +658,17 @@ class Chat:
         show = show or self.ui.show
         if runner or provider not in ("claude", "codex"):
             cmd = dispatch.chat_cmd(provider, route["model"], route["effort"], self.sessions.get(provider),
-                                    files, str(attach.folder()) if files else None)
+                                    files, policy=self.policy)
             return (runner or stream)(cmd, prompt, turn, show, self._started)
         if provider == "codex":
-            key, session = (route["model"], route["effort"]), self.sessions.get("codex")
+            key = (route["model"], route["effort"], self.policy.key)
+            session = self.sessions.get("codex")
             p = self._codex
             if not p or not p.alive() or p.key != key or p.session != session:
                 if p:
                     p.close()
-                self._codex = p = CodexProc(*key, session, approve=getattr(self.ui, "approve", None))
+                self._codex = p = CodexProc(route["model"], route["effort"], session,
+                                            approve=getattr(self.ui, "approve", None), policy=self.policy)
             with p.lock:
                 p.cancelled = False
             self._live = p
@@ -620,22 +711,30 @@ class Chat:
                 prompt = CHAT_NOTE + prompt
             turn = TURNS[provider]()
             started = time.time()
+            baseline = failover.workspace_snapshot(self.policy.workspace)
+            self._attempt_dispatched = False
             try:
                 code = self._run(provider, route, prompt, turn, runner, attachments,
                                  self._notes_only if held else None)
             except OSError as exc:
                 turn.error, code = _short(str(exc), 300), 1
+            else:
+                if not self._attempt_dispatched:
+                    self._attempt_dispatched = True
             self._proc = None
             if self._cancelled:
                 code = 130
             seconds = round(time.time() - started, 1)
             if code == 0 and not turn.error and not turn.text():
                 turn.error = "tidak ada jawaban"
+            if code == 0 and turn.error:
+                code = 1
             ok = code == 0 and not turn.error
             if not held:
                 self._final(turn)
             error = turn.error or (f"exit {code}" if code not in (0, 130) else "")
-            self._log(msg, tier, reasons, llm, provider, route, code, seconds, turn.session, error)
+            self._log(msg, tier, reasons, llm, provider, route, code, seconds, turn.session, error,
+                      turn.usage_data)
             if ok or code == 130:
                 if turn.session:
                     self.sessions[provider] = turn.session
@@ -661,15 +760,29 @@ class Chat:
                 self.provider, self.tier, self.model = provider, tier, route["model"]
                 if not ok:
                     self.ui.failed(provider, code, "", None)
+                self.remember()
                 self.learn_later()
                 return code
             fallback = providers[i + 1] if i < len(providers) - 1 else None
-            self.ui.failed(provider, code, turn.error, fallback)
+            current = failover.workspace_snapshot(self.policy.workspace)
+            attempt = failover.classify_attempt(code, self._attempt_dispatched, self._cancelled, baseline, current)
+            safe_retry = bool(fallback and failover.auto_retry_allowed(attempt))
+            if fallback and not safe_retry:
+                if attempt.changed_files:
+                    listed = ", ".join(attempt.changed_files[:8])
+                    more = " …" if len(attempt.changed_files) > 8 else ""
+                    self.ui.info(f"failover otomatis dihentikan; perubahan terdeteksi: {listed}{more}")
+                else:
+                    self.ui.info("failover otomatis dihentikan; provider mungkin sudah menjalankan permintaan")
+            self.ui.failed(provider, code, turn.error, fallback if safe_retry else None)
+            if not safe_retry:
+                break
         with self._input_lock:
             said = "\n\n".join([msg] + self.injected)
             self.injected = []
         said += f"\n[lampiran: {', '.join(f.name for f in attachments)}]" if attachments else ""
         self.transcript += [("User", said), ("Assistant", f"[gagal: {turn.error or code}]")]
+        self.remember()
         self.learn_later()
         return code
 
@@ -798,13 +911,19 @@ class Chat:
             self.injected.append(content)
             return True
 
-    def _log(self, msg, tier, reasons, llm, provider, route, code, seconds, session, error=""):
+    def _log(self, msg, tier, reasons, llm, provider, route, code, seconds, session, error="", actual_usage=None):
+        decision = self.last_routing
         row = {
             "ts": datetime.now().isoformat(timespec="seconds"),
             "cwd": os.getcwd(),
             "mode": "chat",
             "session": session,
             "tier": tier,
+            "tier_predicted": decision.turn_tier if decision else tier,
+            "tier_context": decision.context_tier if decision else tier,
+            "tier_effective": decision.effective_tier if decision else tier,
+            "related_to_previous": decision.related_to_previous if decision else False,
+            "route_reason": decision.reason if decision else "; ".join(reasons),
             "score": None,
             "reasons": reasons,
             "llm_classified": llm,
@@ -813,6 +932,7 @@ class Chat:
             "effort": route["effort"],
             "exit": code,
             "seconds": seconds,
+            "actual_usage": actual_usage or {},
             "prompt": msg[:500],
         }
         log({**row, "error": error} if error else row)
@@ -824,9 +944,35 @@ class Chat:
         return {**{k: getattr(self, k) for k in STATE}, "carry": self.carry}
 
     def restore(self, state: dict):
-        for k in STATE:
-            if k in state:
-                setattr(self, k, state[k])
+        if not isinstance(state, dict):
+            return
+        history_id = state.get("history_id")
+        self.history_id = history_id if isinstance(history_id, str) and history_id else history.new_id()
+        tiers = set(TIERS)
+        providers = set(self.cfg["providers"])
+        self.tier = state.get("tier") if state.get("tier") in tiers else None
+        self.provider = state.get("provider") if state.get("provider") in providers else None
+        self.model = state.get("model") if isinstance(state.get("model"), str) else None
+        self.pinned_tier = state.get("pinned_tier") if state.get("pinned_tier") in tiers else None
+        pinned_provider = state.get("pinned_provider")
+        self.pinned_provider = pinned_provider if pinned_provider in providers else None
+        self.pinned_model = state.get("pinned_model") if isinstance(state.get("pinned_model"), str) else None
+        effort = state.get("pinned_effort")
+        self.pinned_effort = effort if effort in dispatch.EFFORT_ORDER else None
+        sessions = state.get("sessions")
+        self.sessions = {str(k): str(v) for k, v in sessions.items()
+                         if k in providers and isinstance(v, str)} if isinstance(sessions, dict) else {}
+        synced = state.get("synced")
+        self.synced = {str(k): max(0, int(v)) for k, v in synced.items()
+                       if k in providers and isinstance(v, int)} if isinstance(synced, dict) else {}
+        transcript = state.get("transcript")
+        self.transcript = [(item[0], item[1]) for item in transcript
+                           if isinstance(item, (list, tuple)) and len(item) == 2
+                           and item[0] in ("User", "Assistant") and isinstance(item[1], str)] \
+            if isinstance(transcript, list) else []
+        self.last_reply = state.get("last_reply") if isinstance(state.get("last_reply"), str) else None
+        carry = state.get("carry")
+        self.carry = carry if isinstance(carry, dict) else {}
 
     def catalog_ready(self) -> bool:
         return self._catalog is not None
@@ -877,7 +1023,7 @@ class Chat:
         return (f"tier {self.pinned_tier or self.tier or '-'}{' (dikunci)' if self.pinned_tier else ''}"
                 f" · provider {self.pinned_provider or self.provider or '-'}"
                 f"{' (dikunci)' if self.pinned_provider else ''} · model {self.label()}"
-                f" · effort {self.pinned_effort or 'otomatis'}")
+                f" · effort {self.pinned_effort or 'otomatis'} · keamanan {self.policy.mode.value}")
 
     def switch_command(self, msg: str) -> str | None:
         text = " ".join(msg.lower().split())
@@ -951,6 +1097,8 @@ class Chat:
         if name == "/new":
             self.reset()
             self.ui.info("percakapan baru")
+        elif name == "/history":
+            self.history_command(arg)
         elif name == "/model" and arg in TIERS:
             self.pinned_tier = arg
             self.ui.info(f"tier dikunci: {arg}")
@@ -976,6 +1124,7 @@ class Chat:
             self.pin(name[1:], arg or None)
         else:
             self.ui.info(HELP)
+        self.remember()
         return True
 
 
@@ -1003,7 +1152,7 @@ def read_message(label: str) -> str | None:
 
 def run(cfg: dict, provider: str | None = None, tier: str | None = None, use_llm: bool = True) -> int:
     chat = Chat(cfg, provider, tier, use_llm)
-    say(f"ai chat · {os.getcwd()} · edit dan perintah dijalankan otomatis · /help")
+    say(f"ai chat · {os.getcwd()} · keamanan {chat.policy.mode.value} · /help")
     try:
         return _loop(chat)
     finally:

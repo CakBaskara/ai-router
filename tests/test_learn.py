@@ -120,7 +120,7 @@ def test_chat_audits_confident_ml_decision_in_background(monkeypatch, previous_t
             break
         time.sleep(0.01)
     assert calls == [("halo semuanya", "light", cfg)]
-    assert tier == (previous_tier or floor) and not llm
+    assert tier == floor and not llm
 
 
 @pytest.mark.parametrize("case", ["keyword", "pinned", "llm", "unsure", "disabled", "rate",

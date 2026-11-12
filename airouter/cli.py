@@ -6,13 +6,15 @@ import sys
 import time
 from datetime import datetime
 
-from . import chat, config, dispatch, learn, paths
+from . import __version__, chat, config, dispatch, evaluation, learn, paths
 from .config import log, say, usage_today
 from .learn import TIERS, classify
+from .security import SecurityPolicy
 
 
 def _parse(argv):
     p = argparse.ArgumentParser(prog="ai", description="Route a prompt to the cheapest model that can answer it. With no prompt, open a chat.")
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("prompt", nargs="*", help="prompt text; read from stdin when omitted")
     p.add_argument("-i", "--interactive", action="store_true", help="open an interactive session in the current folder")
     p.add_argument("-t", "--tier", choices=TIERS, help="force a tier")
@@ -27,6 +29,7 @@ def _parse(argv):
     p.add_argument("--style", action="store_true", help="show how long and padded the chat answers are, per provider")
     p.add_argument("--quota", action="store_true", help="show the Claude and Codex usage left in the 5-hour and weekly windows")
     p.add_argument("--migrate-data", action="store_true", help="preview migration of legacy runtime data")
+    p.add_argument("--eval-routing", metavar="DATASET", help="evaluate routing against a frozen JSONL holdout")
     p.add_argument("--migrate-from", type=str, help="legacy logs directory (requires --migrate-data)")
     p.add_argument("--apply", action="store_true", help="copy data after previewing --migrate-data; never overwrite")
     args = p.parse_args(argv)
@@ -35,8 +38,11 @@ def _parse(argv):
     if args.apply and args.dry_run:
         p.error("--apply cannot be combined with --dry-run")
     if args.migrate_data and (args.prompt or args.interactive or args.quota or args.style or args.ml
-                              or args.ml_train or args.ml_auto):
+                              or args.ml_train or args.ml_auto or args.eval_routing):
         p.error("--migrate-data cannot be combined with another action")
+    if args.eval_routing and (args.prompt or args.interactive or args.quota or args.style or args.ml
+                              or args.ml_train or args.ml_auto or args.dry_run):
+        p.error("--eval-routing cannot be combined with another action")
     return args
 
 
@@ -104,6 +110,18 @@ def main(argv=None) -> int:
             print("Migrasi selesai. File sumber tetap ada sebagai cadangan.")
         return 1 if failed else 0
     cfg = config.load()
+    policy = SecurityPolicy.from_config(cfg)
+
+    if args.eval_routing:
+        from pathlib import Path
+        try:
+            report, saved = evaluation.run(Path(args.eval_routing), cfg)
+        except (OSError, ValueError) as exc:
+            print(f"Evaluasi gagal: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        say(f"· laporan: {saved}")
+        return 0 if report["valid_holdout"] else 1
 
     if args.quota:
         config.save_quota("claude", config.claude_usage_windows(dispatch.read_claude_usage()))
@@ -157,7 +175,8 @@ def main(argv=None) -> int:
                 tier = guess
                 reasons = reasons + [why]
 
-    providers = [args.provider] if args.provider else chat.lineup(cfg, usage=usage_today())
+    providers = ([args.provider] if args.provider
+                 else chat.lineup(cfg, usage=usage_today(), quota=config.load_quota()))
     if args.interactive:
         providers = providers[:1]
 
@@ -166,13 +185,23 @@ def main(argv=None) -> int:
     for i, provider in enumerate(providers):
         route = cfg["tiers"][tier][provider]
         say(f"→ {tier} · {provider} {route['model']} ({route['effort']}) · {'; '.join(reasons) or 'default'}")
-        cmd, stdin_text = dispatch.build(provider, route["model"], route["effort"], prompt, args.interactive)
+        cmd, stdin_text = dispatch.build(provider, route["model"], route["effort"], prompt, args.interactive,
+                                         policy)
         if args.dry_run:
             return 0
-        code, used = dispatch.run(cmd, stdin_text, quiet_stderr=provider != "claude"), (provider, route)
+        used = (provider, route)
+        dispatched = True
+        try:
+            code = dispatch.run(cmd, stdin_text, quiet_stderr=provider != "claude")
+        except OSError as exc:
+            code, dispatched = 1, False
+            say(f"· {provider} tidak dapat dijalankan: {exc}")
         if code == 0 or i == len(providers) - 1:
             break
-        say(f"· {provider} gagal (exit {code}), pindah ke {providers[i + 1]}")
+        if dispatched:
+            say(f"· {provider} gagal (exit {code}); failover dihentikan karena permintaan sudah dikirim")
+            break
+        say(f"· pindah ke {providers[i + 1]}")
 
     log({
         "ts": datetime.now().isoformat(timespec="seconds"),
@@ -187,6 +216,7 @@ def main(argv=None) -> int:
         "effort": used[1]["effort"] if used else None,
         "exit": code,
         "seconds": round(time.time() - started, 1),
+        "security_mode": policy.mode.value,
         "prompt": prompt[:500],
     })
     if learn.teach_due(cfg) or learn.style_due():

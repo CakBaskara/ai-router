@@ -1,4 +1,5 @@
 import asyncio
+import threading
 
 import pytest
 
@@ -9,7 +10,8 @@ from airouter import config
 from airouter.chat import Chat
 from textual.containers import VerticalScroll
 
-from airouter.tui import ChatApp, Composer, EffortPanel, ModelPicker, Reply, ScrollButton, UserBubble
+from airouter.tui import (ChatApp, Composer, EffortPanel, HistoryPicker, ModelPicker, QuotaPopup, Reply,
+                          ScrollButton, UserBubble)
 
 CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing", "loop")}, "providers": ["claude", "codex"]}
 
@@ -106,6 +108,44 @@ def test_restored_state_redraws_conversation():
             assert app.chat.sessions == {"claude": "s1"}
             assert len(app.query(UserBubble)) == 1
             assert app.query_one(Reply).query_one(Markdown).source == "hai **juga**"
+    asyncio.run(go())
+
+
+def test_history_picker_resumes_a_saved_conversation():
+    async def go():
+        app = make_app()
+        app.chat.transcript = [("User", "percakapan lama"), ("Assistant", "jawaban lama")]
+        saved_id = app.chat.history_id
+        assert app.chat.remember()
+        app.chat.reset()
+        async with app.run_test(size=(100, 32)) as pilot:
+            history = app.query_one("#history")
+            assert str(history.render()) == "⟲"
+            assert (history.region.width, history.region.height) == (7, 3)
+            await pilot.click("#history")
+            await pilot.pause()
+            assert isinstance(app.screen, HistoryPicker)
+            app.screen.dismiss(saved_id)
+            await pilot.pause()
+            assert app.chat.history_id == saved_id
+            assert app.chat.transcript[-1] == ("Assistant", "jawaban lama")
+            assert str(app.query_one(UserBubble).render()) == "percakapan lama"
+            assert app.query_one(Reply).query_one(Markdown).source == "jawaban lama"
+    asyncio.run(go())
+
+
+def test_approval_timeout_defaults_to_deny():
+    async def go():
+        app = make_app()
+        app.chat.cfg = {**app.chat.cfg, "security": {"approval_timeout_seconds": 0.1}}
+        result = []
+        async with app.run_test(size=(100, 32)) as pilot:
+            worker = threading.Thread(target=lambda: result.append(
+                app.chat.ui.approve({"requestMethod": "item/fileChange/requestApproval"}, lambda: False)))
+            worker.start()
+            await _until(pilot, lambda: result, timeout=2)
+            worker.join(1)
+            assert result == [False] and not worker.is_alive()
     asyncio.run(go())
 
 
@@ -463,6 +503,7 @@ def test_stop_button_shows_while_busy_and_cancels():
         async with app.run_test(size=(100, 20)) as pilot:
             await pilot.pause()
             stop = app.query_one("#stop")
+            assert str(stop.render()) == "■" and stop.region.width == 6
             assert stop.display and not stop.has_class("busy")
             app.busy = True
             await pilot.pause()
@@ -737,11 +778,17 @@ def test_quota_poll_updates_the_top_bar(monkeypatch):
         usage = {"five_hour": {"utilization": 30.0, "resets_at": "2100-01-01T00:00:00+00:00"}}
         monkeypatch.setattr(dispatch, "read_claude_usage", lambda timeout=15: usage)
         async with app.run_test(size=(120, 32)) as pilot:
-            await _until(pilot, lambda: "claude 5j 70%" in str(app.query_one("#quota").render()))
-            assert "claude 5j 70%" in str(app.query_one("#quota").render())
+            await _until(pilot, lambda: "claude 5j 70%" in config.quota_line())
+            quota = app.query_one("#quota")
+            assert str(quota.render()) == "◎"
+            assert (quota.region.width, quota.region.height) == (7, 3)
+            await pilot.click("#quota")
+            await pilot.pause()
+            assert isinstance(app.screen, QuotaPopup)
+            assert "claude 5j 70%" in str(app.screen.query_one("#quota-details").render())
             config.save_quota("claude", {"5h": {"used": 45, "resets": 4102444800}})
-            await _until(pilot, lambda: "55%" in str(app.query_one("#quota").render()), timeout=5)
-            assert "claude 5j 55%" in str(app.query_one("#quota").render())
+            await _until(pilot, lambda: "55%" in str(app.screen.query_one("#quota-details").render()), timeout=5)
+            assert "claude 5j 55%" in str(app.screen.query_one("#quota-details").render())
     asyncio.run(go())
 
 
@@ -771,7 +818,7 @@ def test_one_panel_picks_model_and_effort_and_stays_open():
             await _until(pilot, lambda: app.chat.pinned_effort == "high")
             assert app.screen is picker
             assert "dipakai" in str(picker.query_one("#effort-title").render())
-            assert "haiku · High" in str(app.query_one("#model").render())
+            assert str(app.query_one("#model").render()) == "◆ auto · Otomatis ▾"
             assert app.chat.route_for("light", "claude") == {"model": "haiku", "effort": "high"}
             await pilot.click("#effort-slider", offset=(EffortPanel.WIDTH - 1, 0))
             await pilot.pause()

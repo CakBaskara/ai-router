@@ -1,9 +1,10 @@
 import json
+import subprocess
 import tomllib
 
 import pytest
 
-from airouter import config, dispatch
+from airouter import approval, config, dispatch
 from airouter.chat import ClaudeProc
 from airouter.security import Mode, SecurityPolicy
 
@@ -117,6 +118,101 @@ def test_policy_key_changes_when_mode_changes(tmp_path):
 def test_workspace_write_keeps_destructive_approval_unless_disabled(tmp_path):
     assert policy(tmp_path, Mode.WORKSPACE_WRITE).approval_policy == "on-request"
     assert policy(tmp_path, Mode.WORKSPACE_WRITE, confirm_destructive=False).approval_policy == "never"
+
+
+def test_isolated_workspace_applies_diff_only_after_approval(tmp_path):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    target = workspace / "file.txt"
+    target.write_text("before\n", encoding="utf-8")
+    isolated = approval.IsolatedWorkspace(workspace)
+    try:
+        (isolated.workspace / "file.txt").write_text("after\n", encoding="utf-8")
+        assert target.read_text(encoding="utf-8") == "before\n"
+        shown = []
+        result = isolated.review(lambda params, cancelled: shown.append(params) or True, lambda: False)
+        assert result.decision == "applied" and result.changed == ("file.txt",)
+        assert "-before" in shown[0]["diff"] and "+after" in shown[0]["diff"]
+        assert target.read_text(encoding="utf-8") == "after\n"
+    finally:
+        isolated.close()
+
+
+def test_isolated_workspace_reverts_rejected_changes(tmp_path):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    isolated = approval.IsolatedWorkspace(workspace)
+    try:
+        staged = isolated.workspace / "new.txt"
+        staged.write_text("new\n", encoding="utf-8")
+        result = isolated.review(lambda params, cancelled: False, lambda: False)
+        assert result.decision == "rejected"
+        assert not (workspace / "new.txt").exists() and not staged.exists()
+    finally:
+        isolated.close()
+
+
+def test_isolated_workspace_refuses_concurrent_target_change(tmp_path):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    target = workspace / "file.txt"
+    target.write_text("before\n", encoding="utf-8")
+    isolated = approval.IsolatedWorkspace(workspace)
+    try:
+        (isolated.workspace / "file.txt").write_text("provider\n", encoding="utf-8")
+        target.write_text("user\n", encoding="utf-8")
+        result = isolated.review(lambda params, cancelled: True, lambda: False)
+        assert result.decision == "conflict" and result.conflicts == ("file.txt",)
+        assert target.read_text(encoding="utf-8") == "user\n"
+    finally:
+        isolated.preserve = False
+        isolated.close()
+
+
+def test_isolated_policy_disables_network_and_nested_prompts(tmp_path):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    isolated = approval.IsolatedWorkspace(workspace)
+    try:
+        selected = isolated.policy
+        assert selected.mode is Mode.WORKSPACE_WRITE and not selected.network_allowed
+        assert selected.approval_policy == "never" and selected.workspace != workspace
+        claude = dispatch.chat_cmd("claude", "sonnet", "low", None, policy=selected)
+        assert "--restricted" in claude
+        assert claude[claude.index("--permission-prompts") + 1] == "none"
+    finally:
+        isolated.close()
+
+
+def test_git_isolation_starts_from_dirty_workspace(tmp_path):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=workspace, check=True, capture_output=True)
+
+    git("init", "-q")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.invalid")
+    tracked = workspace / "tracked.txt"
+    tracked.write_text("committed\n", encoding="utf-8")
+    git("add", "tracked.txt")
+    git("commit", "-qm", "initial")
+    tracked.write_text("user dirty\n", encoding="utf-8")
+    (workspace / "untracked.txt").write_text("local\n", encoding="utf-8")
+
+    isolated = approval.IsolatedWorkspace(workspace)
+    try:
+        assert isolated.worktree
+        assert (isolated.workspace / "tracked.txt").read_text(encoding="utf-8") == "user dirty\n"
+        assert (isolated.workspace / "untracked.txt").read_text(encoding="utf-8") == "local\n"
+        (isolated.workspace / "tracked.txt").write_text("provider\n", encoding="utf-8")
+        result = isolated.review(lambda params, cancelled: True, lambda: False)
+        assert result.decision == "applied"
+        assert tracked.read_text(encoding="utf-8") == "provider\n"
+        assert (workspace / "untracked.txt").read_text(encoding="utf-8") == "local\n"
+    finally:
+        isolated.close()
 
 
 def test_full_access_is_the_default_mode(tmp_path):

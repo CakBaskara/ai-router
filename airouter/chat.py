@@ -9,12 +9,12 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import attach, config, dispatch, failover, history, learn, optimizer
+from . import approval, attach, config, dispatch, failover, history, learn, optimizer
 from .dispatch import CodexProc
 from .config import log, say, usage_today
 from .learn import TIERS, classify
 from .routing_policy import RoutingDecision, decide
-from .security import SecurityPolicy
+from .security import Mode, SecurityPolicy
 
 HELP = (
     "/new                      percakapan baru\n"
@@ -41,20 +41,6 @@ CHAT_NOTE = (
     "name> to pick one, or /model auto to go back to automatic routing; a short message such as \"pakai opus\" or "
     "\"ganti ke codex\" does the same. /new starts a new conversation.\n\n"
 )
-REVIEW_PROMPT = (
-    "You are an independent reviewer of another AI assistant's answer, given below with the request it answers. "
-    "Verify instead of guessing: read files and run read-only commands such as git diff where that settles a claim. "
-    "Do not change any file. Judge correctness, completeness against the request, bugs, risks and claims without "
-    "evidence; ignore style and minor preferences. End with a line holding only LOLOS or REVISI. After REVISI, list "
-    "the concrete problems that must be fixed, most important first, in the language of the request.\n\n"
-)
-REVISE_PROMPT = (
-    "A fresh review of your last answer, run without this conversation, asked for a revision:\n\n{critique}\n\n"
-    "Check each point, and look at code or files only when the point is about them. Fix what is right, files "
-    "included; reject what is wrong with a short reason. Then write your full final answer again without talking "
-    "about the review, because the user reads only this one."
-)
-VERDICT = re.compile(r"^\W*(LOLOS|REVISI)\b\W*$", re.M | re.I)
 STATE = ("history_id", "tier", "provider", "model", "sessions", "synced", "transcript", "last_reply",
          "pinned_provider", "pinned_tier", "pinned_model", "pinned_effort")
 RECAP_ENTRIES = 12
@@ -72,24 +58,6 @@ STRONGER = ("kuat", "pintar", "berat", "naik", "stronger", "smarter", "bigger")
 BARE_STEP = re.compile(r"(?:(?:oke|ok|coba|tolong|please) )*(?:turun(?:kan|in)?|naik(?:kan|in)?)"
                        r"(?: (?:aja|saja|dong|ya|deh))?[.!]?")
 TOOL_KEYS = ("file_path", "command", "pattern", "path", "url", "query", "description")
-
-
-def parse_review(text: str) -> tuple[str | None, str]:
-    found = list(VERDICT.finditer(text))
-    if not found:
-        return None, "jawaban reviewer tidak berakhir dengan LOLOS atau REVISI"
-    verdict = found[-1].group(1).upper()
-    critique = text[found[-1].end():].strip() or text[:found[-1].start()].strip()
-    return verdict, critique if verdict == "REVISI" else ""
-
-
-def review_due(cfg: dict, provider: str, model: str) -> bool:
-    family, _, least = cfg.get("loop", {}).get("models", {}).get(provider, "").partition(" ")
-    if not family or family.lower() not in re.split(r"[-._ ]", model.lower()):
-        return False
-    # Long digit runs are release dates, not versions; a bare alias like "fable" points at the newest version.
-    have = [int(n) for n in re.findall(r"\d+", model) if len(n) < 6]
-    return not have or have >= [int(n) for n in re.findall(r"\d+", least)]
 
 
 def higher(a: str, b: str) -> str:
@@ -299,8 +267,9 @@ TURNS = {"claude": ClaudeTurn, "codex": CodexTurn}
 
 
 def lineup(cfg: dict, sticky: str | None = None, usage: dict | None = None,
-           quota: dict | None = None) -> list[str]:
-    return optimizer.rank_providers(cfg, sticky, usage, quota)
+           quota: dict | None = None, history: list[dict] | None = None,
+           tier: str | None = None) -> list[str]:
+    return optimizer.rank_providers(cfg, sticky, usage, quota, history, tier)
 
 
 class Printer:
@@ -385,7 +354,8 @@ class ClaudeProc:
         self.session = session
         self.approve = approve
         cmd = dispatch.chat_cmd("claude", model, effort, session, policy=policy)
-        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.proc = subprocess.Popen(cmd, cwd=policy.workspace, stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.errors = []
         self.lock = threading.Lock()
         self.active = False
@@ -505,6 +475,7 @@ class Chat:
         self.carry = {}
         self.use_llm = use_llm and cfg["classifier"].get("llm_fallback", False)
         self.policy = SecurityPolicy.from_config(cfg)
+        self._isolation = None
         self.reset()
 
     def reset(self):
@@ -520,6 +491,7 @@ class Chat:
         self.transcript = []
         self.last_reply = None
         self.last_routing = None
+        self.last_candidates = []
 
     def persistent_state(self) -> dict:
         return {k: getattr(self, k) for k in STATE}
@@ -587,8 +559,12 @@ class Chat:
 
     def order(self, tier: str) -> list[str]:
         if self.pinned_provider:
+            self.last_candidates = []
             return [self.pinned_provider]
-        return lineup(self.cfg, self.provider, usage_today(), config.load_quota())
+        ranked = optimizer.rank_candidates(self.cfg, self.provider, usage_today(), config.load_quota(),
+                                           config.route_history(), tier)
+        self.last_candidates = [candidate.log_data() for candidate in ranked]
+        return [candidate.provider for candidate in ranked]
 
     def _started(self, proc):
         self._attempt_dispatched = True
@@ -604,13 +580,26 @@ class Chat:
         if self._proc and self._proc.poll() is None:
             self._proc.kill()
 
-    def close(self):
+    def _close_providers(self):
         if self._claude:
             self._claude.close()
             self._claude = None
         if self._codex:
             self._codex.close()
             self._codex = None
+
+    def close(self):
+        self._close_providers()
+        if self._isolation:
+            self._isolation.close()
+            self._isolation = None
+
+    def execution_policy(self) -> SecurityPolicy:
+        if self.policy.mode is not Mode.APPROVAL_REQUIRED:
+            return self.policy
+        if self._isolation is None:
+            self._isolation = approval.IsolatedWorkspace(self.policy.workspace, self.policy.read_roots)
+        return self._isolation.policy
 
     def route_for(self, tier: str, provider: str) -> dict:
         route = dict(self.cfg["tiers"][tier][provider])
@@ -637,13 +626,14 @@ class Chat:
         self.ui.info(f"effort dikunci: {level}" if level else "effort otomatis (ikut tier)")
 
     def _claude_proc(self, route: dict) -> ClaudeProc:
-        key = (route["model"], route["effort"], self.policy.key)
+        policy = self.execution_policy()
+        key = (route["model"], route["effort"], policy.key)
         session = self.sessions.get("claude")
         p = self._claude
         if p and p.alive() and p.key == key and p.session == session:
             return p
-        self.close()
-        self._claude = ClaudeProc(route["model"], route["effort"], session, self.policy,
+        self._close_providers()
+        self._claude = ClaudeProc(route["model"], route["effort"], session, policy,
                                   getattr(self.ui, "approve", None))
         return self._claude
 
@@ -656,19 +646,20 @@ class Chat:
     def _run(self, provider: str, route: dict, prompt: str, turn, runner, files=(), show=None) -> int:
         prompt = with_files(provider, prompt, files)
         show = show or self.ui.show
+        policy = self.execution_policy()
         if runner or provider not in ("claude", "codex"):
             cmd = dispatch.chat_cmd(provider, route["model"], route["effort"], self.sessions.get(provider),
-                                    files, policy=self.policy)
+                                    files, policy=policy)
             return (runner or stream)(cmd, prompt, turn, show, self._started)
         if provider == "codex":
-            key = (route["model"], route["effort"], self.policy.key)
+            key = (route["model"], route["effort"], policy.key)
             session = self.sessions.get("codex")
             p = self._codex
             if not p or not p.alive() or p.key != key or p.session != session:
                 if p:
                     p.close()
                 self._codex = p = CodexProc(route["model"], route["effort"], session,
-                                            approve=getattr(self.ui, "approve", None), policy=self.policy)
+                                            approve=getattr(self.ui, "approve", None), policy=policy)
             with p.lock:
                 p.cancelled = False
             self._live = p
@@ -684,26 +675,41 @@ class Chat:
         if final:
             final(turn.final())
 
-    def _notes_only(self, kind: str, text: str):
-        if kind == "note":
-            self.ui.show(kind, text)
+    def _review_isolated_changes(self):
+        if not self._isolation:
+            return None
+        result = self._isolation.review(getattr(self.ui, "approve", None), lambda: self._cancelled)
+        listed = ", ".join(result.changed[:8])
+        if len(result.changed) > 8:
+            listed += ", …"
+        if result.decision == "applied":
+            self.ui.info(f"perubahan terisolasi diterapkan: {listed}")
+        elif result.decision == "rejected":
+            self.ui.info(f"perubahan terisolasi tidak diterapkan: {listed}")
+        elif result.decision == "conflict":
+            conflicts = ", ".join(result.conflicts)
+            self.ui.info(f"perubahan tidak diterapkan karena konflik: {conflicts}\nstaging: {self._isolation.workspace}")
+        return result
 
     def send(self, msg: str, runner=None, attachments=()) -> int:
         self._cancelled = False
         self.injected = []
+        try:
+            policy = self.execution_policy()
+            if self._isolation:
+                self._isolation.refresh()
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            self.ui.info(f"workspace approval tidak dapat disiapkan: {_short(str(exc), 300)}")
+            return 1
         self._note_reaction(msg)
         style, note = learn.style_note()
         tier, reasons, llm = self.route(msg)
         providers = self.order(tier)
         code = 1
-        begun = time.time()
         for i, provider in enumerate(providers):
             if self.injected:
                 msg, self.injected = "\n\n".join([msg] + self.injected), []
             route = self.route_for(tier, provider)
-            held = review_due(self.cfg, provider, route["model"])
-            if held:
-                self.ui.info("jawaban ditahan sampai lolos review")
             self.ui.start(tier, provider, route, reasons)
             unseen = self.transcript[self.synced.get(provider, 0):]
             prompt = (recap(unseen) if unseen else "") + note + msg
@@ -711,11 +717,10 @@ class Chat:
                 prompt = CHAT_NOTE + prompt
             turn = TURNS[provider]()
             started = time.time()
-            baseline = failover.workspace_snapshot(self.policy.workspace)
+            baseline = failover.workspace_snapshot(policy.workspace)
             self._attempt_dispatched = False
             try:
-                code = self._run(provider, route, prompt, turn, runner, attachments,
-                                 self._notes_only if held else None)
+                code = self._run(provider, route, prompt, turn, runner, attachments)
             except OSError as exc:
                 turn.error, code = _short(str(exc), 300), 1
             else:
@@ -729,9 +734,17 @@ class Chat:
                 turn.error = "tidak ada jawaban"
             if code == 0 and turn.error:
                 code = 1
+            try:
+                isolated = self._review_isolated_changes()
+            except (OSError, ValueError) as exc:
+                isolated = None
+                turn.error = f"preview perubahan gagal: {_short(str(exc), 300)}"
+                code = 1
+            if isolated and isolated.decision == "conflict":
+                turn.error = f"konflik saat menerapkan perubahan: {', '.join(isolated.conflicts)}"
+                code = 1
             ok = code == 0 and not turn.error
-            if not held:
-                self._final(turn)
+            self._final(turn)
             error = turn.error or (f"exit {code}" if code not in (0, 130) else "")
             self._log(msg, tier, reasons, llm, provider, route, code, seconds, turn.session, error,
                       turn.usage_data)
@@ -740,15 +753,6 @@ class Chat:
                     self.sessions[provider] = turn.session
                 if ok:
                     self.ui.done(seconds, turn.usage)
-                    if held:
-                        turn = self.refine(msg, tier, provider, route, turn, runner)
-                        self.ui.start(tier, provider, route, ["final"])
-                        self.ui.show("text", turn.text())
-                        self._final(turn)
-                        self.ui.done(round(time.time() - begun, 1), turn.usage)
-                elif held:
-                    self.ui.show("text", turn.text())
-                    self._final(turn)
                 reply = turn.text() + (" [dibatalkan]" if code == 130 else "")
                 with self._input_lock:
                     said = "\n\n".join([msg] + self.injected)
@@ -764,7 +768,7 @@ class Chat:
                 self.learn_later()
                 return code
             fallback = providers[i + 1] if i < len(providers) - 1 else None
-            current = failover.workspace_snapshot(self.policy.workspace)
+            current = failover.workspace_snapshot(policy.workspace)
             attempt = failover.classify_attempt(code, self._attempt_dispatched, self._cancelled, baseline, current)
             safe_retry = bool(fallback and failover.auto_retry_allowed(attempt))
             if fallback and not safe_retry:
@@ -803,105 +807,6 @@ class Chat:
     def learn_later(self):
         threading.Thread(target=learn.teach_if_due, args=(self.cfg,), daemon=True).start()
 
-    def quota_low(self, providers) -> str | None:
-        floor = self.cfg.get("loop", {}).get("min_quota", 20)
-        if "codex" in providers:
-            config.save_quota("codex", config.codex_windows(dispatch.read_limits()))
-        data = config.load_quota()
-        for provider in dict.fromkeys(providers):
-            window = (data.get(provider) or {}).get("5h")
-            if window and config.quota_left(window) < floor:
-                return f"kuota 5 jam {provider} tinggal {config.quota_left(window)}% (batas {floor}%)"
-        return None
-
-    def refine(self, msg: str, tier: str, provider: str, route: dict, turn, runner):
-        limit = self.cfg.get("loop", {}).get("max_rounds", 3)
-        rounds = 0
-        while not self._cancelled:
-            low = self.quota_low((provider,))
-            if low:
-                self.ui.info(f"review dilewati: {low}")
-                break
-            if rounds == limit:
-                self.ui.info(f"belum lolos setelah {limit} review; ini versi terakhir")
-                break
-            rounds += 1
-            self.ui.info(f"review {rounds} oleh {provider} {route['model']} (sesi baru)...")
-            verdict, critique = self.review(msg, turn.text(), provider, route, tier, runner)
-            if verdict == "LOLOS":
-                self.ui.info(f"✓ lolos review {rounds}")
-                break
-            if verdict != "REVISI":
-                self.ui.info(f"review berhenti: {critique}")
-                break
-            self.ui.info(f"↻ revisi {rounds}:\n{critique}")
-            revised = self.revise(tier, provider, route, critique, rounds, runner)
-            if not revised:
-                break
-            turn = revised
-        return turn
-
-    def revise(self, tier: str, provider: str, route: dict, critique: str, rounds: int, runner):
-        prompt = learn.style_note()[1] + REVISE_PROMPT.format(critique=critique)
-        for attempt in (1, 2):
-            self.ui.start(tier, provider, route, [f"revisi {rounds}"])
-            revised = TURNS[provider]()
-            started = time.time()
-            try:
-                code = self._run(provider, route, prompt, revised, runner, show=self._notes_only)
-            except OSError as exc:
-                revised.error, code = _short(str(exc), 300), 1
-            self._proc = None
-            if self._cancelled:
-                code = 130
-            seconds = round(time.time() - started, 1)
-            error = "" if code == 0 and revised.text() and not revised.error else revised.error or "tidak ada jawaban"
-            self._log_loop("revise", tier, provider, route, code, seconds, revised.session, error)
-            if not error:
-                if revised.session:
-                    self.sessions[provider] = revised.session
-                self.ui.done(seconds, revised.usage)
-                return revised
-            self.ui.failed(provider, code, error, None)
-            if code == 130 or attempt == 2:
-                break
-            self.ui.info("revisi dicoba sekali lagi")
-        self.ui.info("revisi gagal; ini versi sebelumnya")
-        return None
-
-    def review(self, msg: str, answer: str, reviewer: str, route: dict, tier: str, runner) -> tuple[str | None, str]:
-        context = recap(self.transcript) if self.transcript else ""
-        prompt = f"{REVIEW_PROMPT}{context}Request:\n{msg}\n\n---\nAnswer to review:\n{answer}"
-        turn = TURNS[reviewer]()
-        started = time.time()
-        try:
-            code = (runner or stream)(dispatch.review_cmd(reviewer, route["model"], route["effort"]), prompt, turn,
-                                      lambda kind, text: None, self._started)
-        except (OSError, ValueError) as exc:
-            turn.error, code = _short(str(exc), 300), 1
-        self._proc = None
-        self._log_loop("review", tier, reviewer, route, code, round(time.time() - started, 1), None, turn.error)
-        if self._cancelled:
-            return None, "dibatalkan"
-        if code != 0 or turn.error:
-            return None, f"review gagal: {turn.error or f'exit {code}'}"
-        return parse_review(turn.text())
-
-    def _log_loop(self, mode, tier, provider, route, code, seconds, session, error=""):
-        row = {
-            "ts": datetime.now().isoformat(timespec="seconds"),
-            "cwd": os.getcwd(),
-            "mode": mode,
-            "session": session,
-            "tier": tier,
-            "provider": provider,
-            "model": route["model"],
-            "effort": route["effort"],
-            "exit": code,
-            "seconds": seconds,
-        }
-        log({**row, "error": error} if error else row)
-
     def inject(self, msg: str, files=()) -> bool:
         with self._input_lock:
             p = self._live
@@ -913,6 +818,7 @@ class Chat:
 
     def _log(self, msg, tier, reasons, llm, provider, route, code, seconds, session, error="", actual_usage=None):
         decision = self.last_routing
+        learn.remember_prompt(msg)
         row = {
             "ts": datetime.now().isoformat(timespec="seconds"),
             "cwd": os.getcwd(),
@@ -933,7 +839,11 @@ class Chat:
             "exit": code,
             "seconds": seconds,
             "actual_usage": actual_usage or {},
-            "prompt": msg[:500],
+            "candidate_scores": self.last_candidates,
+            "estimated_quota_cost": None,
+            "cost_verified": False,
+            "outcome": "cancelled" if code == 130 else "success" if code == 0 and not error else "failed",
+            **config.prompt_log_fields(msg, self.cfg),
         }
         log({**row, "error": error} if error else row)
 

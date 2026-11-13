@@ -6,7 +6,7 @@ import sys
 import time
 from datetime import datetime
 
-from . import __version__, chat, config, dispatch, evaluation, learn, paths
+from . import __version__, chat, config, dispatch, evaluation, learn, optimizer, paths
 from .config import log, say, usage_today
 from .learn import TIERS, classify
 from .security import SecurityPolicy
@@ -175,8 +175,9 @@ def main(argv=None) -> int:
                 tier = guess
                 reasons = reasons + [why]
 
-    providers = ([args.provider] if args.provider
-                 else chat.lineup(cfg, usage=usage_today(), quota=config.load_quota()))
+    ranked = [] if args.provider else optimizer.rank_candidates(
+        cfg, usage=usage_today(), quota=config.load_quota(), history=config.route_history(), tier=tier)
+    providers = [args.provider] if args.provider else [candidate.provider for candidate in ranked]
     if args.interactive:
         providers = providers[:1]
 
@@ -203,6 +204,7 @@ def main(argv=None) -> int:
             break
         say(f"· pindah ke {providers[i + 1]}")
 
+    learn.remember_prompt(prompt)
     log({
         "ts": datetime.now().isoformat(timespec="seconds"),
         "cwd": os.getcwd(),
@@ -217,7 +219,11 @@ def main(argv=None) -> int:
         "exit": code,
         "seconds": round(time.time() - started, 1),
         "security_mode": policy.mode.value,
-        "prompt": prompt[:500],
+        "candidate_scores": [candidate.log_data() for candidate in ranked],
+        "estimated_quota_cost": None,
+        "cost_verified": False,
+        "outcome": "success" if code == 0 else "cancelled" if code == 130 else "failed",
+        **config.prompt_log_fields(prompt, cfg),
     })
     if learn.teach_due(cfg) or learn.style_due():
         _learn_detached()

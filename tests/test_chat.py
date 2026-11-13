@@ -4,7 +4,7 @@ import time
 from datetime import datetime
 
 from airouter import cli, config, dispatch, learn
-from airouter.chat import CHAT_NOTE, Chat, ClaudeTurn, CodexTurn, lineup, parse_review, recap, review_due
+from airouter.chat import CHAT_NOTE, Chat, ClaudeTurn, CodexTurn, lineup, recap
 
 CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing", "loop")}, "providers": ["claude", "codex"]}
 
@@ -76,6 +76,21 @@ def test_failed_chat_logs_the_error():
     assert c.send("coba lagi", runner=run) == 1
     row = json.loads(config.log_path().read_text(encoding="utf-8").strip())
     assert row["mode"] == "chat" and row["exit"] == 1 and row["error"] == "session hilang"
+
+
+def test_route_log_hashes_prompt_and_learning_queue_is_temporary():
+    run, _ = fake_runner([(0, claude_reply("jawaban"))])
+    c = Chat({**CFG, "providers": ["claude"]}, use_llm=False, ui=RecordUI())
+    assert c.send("prompt rahasia", runner=run) == 0
+    row = json.loads(config.log_path().read_text(encoding="utf-8").strip())
+    assert "prompt" not in row and len(row["prompt_sha256"]) == 64 and row["prompt_chars"] == 14
+    queued = learn.prompt_queue_path().read_text(encoding="utf-8")
+    assert "prompt rahasia" in queued
+
+
+def test_raw_route_prompt_requires_explicit_opt_in():
+    cfg = {**CFG, "privacy": {"log_prompts": True}}
+    assert config.prompt_log_fields("boleh disimpan", cfg) == {"prompt": "boleh disimpan"}
 
 
 def test_codex_turn():
@@ -435,11 +450,6 @@ def test_quota_report_lists_both_providers():
     assert "codex   5 jam   sisa  75%" in text and "claude  belum ada data" in text
 
 
-LOOP_CFG = {**CFG, "tiers": {**CFG["tiers"], "heavy": {**CFG["tiers"]["heavy"],
-                                                       "claude": {"model": "claude-fable-5-1", "effort": "high"}}},
-            "loop": {"models": {"claude": "fable 5", "codex": "astra 6"}, "min_quota": 20}}
-
-
 class RecordUI:
     def __init__(self):
         self.shown = []
@@ -461,105 +471,45 @@ class RecordUI:
         pass
 
 
-def showing_runner(replies):
-    calls = []
-
-    def run(cmd, prompt, turn, show, started):
-        calls.append((cmd, prompt))
-        code, events = replies.pop(0)
-        for ev in events:
-            shown = turn.feed(ev)
-            if shown:
-                show(*shown)
-        return code
-
-    return run, calls
-
-
-def test_heavy_answer_is_self_reviewed_and_only_final_is_shown():
-    run, calls = showing_runner([(0, claude_reply("versi 1")), (0, claude_reply("Cek angka.\nREVISI\n- angka salah")),
-                                 (0, claude_reply("versi 2")), (0, claude_reply("Sudah benar.\n**LOLOS**"))])
-    ui = RecordUI()
-    c = Chat(LOOP_CFG, provider="claude", tier="heavy", use_llm=False, ui=ui)
-    assert c.send("hitung ulang anggaran", runner=run) == 0
-    assert c.transcript[-1] == ("Assistant", "versi 2")
-    assert [t for k, t in ui.shown if k == "text"] == ["versi 2"]
-    reviews = [i for i, (cmd, _) in enumerate(calls) if "--no-session-persistence" in cmd]
-    assert reviews == [1, 3] and all("claude-fable-5-1" in calls[i][0] for i in reviews)
-    assert "versi 1" in calls[1][1] and "hitung ulang anggaran" in calls[1][1]
-    assert "- angka salah" in calls[2][1]
-    rows = [json.loads(line) for line in config.log_path().read_text(encoding="utf-8").splitlines()]
-    assert [r["mode"] for r in rows] == ["chat", "review", "revise", "review"]
-    assert all("prompt" not in r for r in rows[1:])
-
-
-def test_failed_revision_is_retried_once():
-    run, calls = fake_runner([(0, claude_reply("versi 1")), (0, claude_reply("REVISI\n- kurang")),
-                              (1, []), (0, claude_reply("versi 2")), (0, claude_reply("LOLOS"))])
-    c = Chat(LOOP_CFG, provider="claude", tier="heavy", use_llm=False, ui=RecordUI())
-    assert c.send("rancang arsitektur", runner=run) == 0
-    assert c.transcript[-1] == ("Assistant", "versi 2") and len(calls) == 5
-    rows = [json.loads(line) for line in config.log_path().read_text(encoding="utf-8").splitlines()]
-    assert [r["mode"] for r in rows] == ["chat", "review", "revise", "revise", "review"]
-    assert rows[2]["error"] and "error" not in rows[3]
-
-
-def test_loop_stops_after_max_rounds_with_last_version():
-    replies = [(0, claude_reply("versi 1"))]
-    for n in (2, 3):
-        replies += [(0, claude_reply("REVISI\n- lagi")), (0, claude_reply(f"versi {n}"))]
-    run, calls = fake_runner(replies)
-    ui = RecordUI()
-    c = Chat({**LOOP_CFG, "loop": {**LOOP_CFG["loop"], "max_rounds": 2}},
-             provider="claude", tier="heavy", use_llm=False, ui=ui)
-    assert c.send("rancang arsitektur", runner=run) == 0
-    assert len(calls) == 5 and c.transcript[-1] == ("Assistant", "versi 3")
-    assert any("belum lolos setelah 2 review" in i for i in ui.infos)
-
-
-def test_loop_stops_when_quota_is_low():
-    config.save_quota("claude", {"5h": {"used": 90, "resets": None}})
+def test_high_model_answer_is_returned_without_review():
     run, calls = fake_runner([(0, claude_reply("jawaban"))])
-    c = Chat(LOOP_CFG, provider="claude", tier="heavy", use_llm=False)
+    cfg = {**CFG, "tiers": {**CFG["tiers"], "heavy": {**CFG["tiers"]["heavy"],
+                                                           "claude": {"model": "claude-fable-5-1",
+                                                                      "effort": "high"}}}}
+    c = Chat(cfg, provider="claude", tier="heavy", use_llm=False, ui=RecordUI())
     assert c.send("rancang arsitektur", runner=run) == 0
     assert len(calls) == 1 and c.transcript[-1] == ("Assistant", "jawaban")
 
 
-def test_loop_skips_models_not_listed():
-    run, calls = fake_runner([(0, claude_reply("ok"))])
-    c = Chat(LOOP_CFG, provider="claude", tier="medium", use_llm=False)
-    assert c.send("fix bug ini", runner=run) == 0 and len(calls) == 1
+def test_approval_mode_applies_isolated_changes_after_ui_accepts(tmp_path, monkeypatch):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
 
+    class ApprovingUI(RecordUI):
+        def __init__(self):
+            super().__init__()
+            self.approvals = []
 
-def test_review_only_for_listed_families_at_or_above_version():
-    due = [m for m in ("claude-fable-5-1", "claude-fable-5", "fable", "claude-opus-5-5", "opus", "sonnet")
-           if review_due(LOOP_CFG, "claude", m)]
-    assert due == ["claude-fable-5-1", "claude-fable-5", "fable"]
-    due = [m for m in ("gpt-6-astra", "gpt-6.1-astra", "gpt-7-astra", "gpt-5.6-astra", "gpt-6.1-sol", "gpt-6-sol")
-           if review_due(LOOP_CFG, "codex", m)]
-    assert due == ["gpt-6-astra", "gpt-6.1-astra", "gpt-7-astra"]
-    assert not review_due(LOOP_CFG, "other", "fable") and not review_due(CFG, "claude", "fable")
+        def approve(self, params, cancelled):
+            self.approvals.append(params)
+            return True
 
+    ui = ApprovingUI()
+    cfg = {**CFG, "providers": ["claude"], "security": {"mode": "approval-required"}}
+    c = Chat(cfg, provider="claude", tier="medium", use_llm=False, ui=ui)
+    base_run, calls = fake_runner([(0, claude_reply("selesai"))])
 
-def test_pinned_high_model_is_reviewed_in_any_tier():
-    run, calls = fake_runner([(0, claude_reply("jawaban")), (0, claude_reply("LOLOS"))])
-    c = Chat(LOOP_CFG, provider="claude", tier="medium", use_llm=False, ui=RecordUI())
-    c.pinned_provider, c.pinned_model = "claude", "claude-fable-5-1"
-    assert c.send("fix bug ini", runner=run) == 0 and len(calls) == 2
+    def run(*args):
+        (c._isolation.workspace / "result.txt").write_text("approved\n", encoding="utf-8")
+        return base_run(*args)
 
-
-def test_unreadable_review_keeps_first_answer():
-    run, calls = fake_runner([(0, claude_reply("jawaban")), (0, codex_reply("kelihatannya bagus"))])
-    c = Chat(LOOP_CFG, provider="claude", tier="heavy", use_llm=False)
-    assert c.send("rancang arsitektur", runner=run) == 0
-    assert len(calls) == 2 and c.transcript[-1] == ("Assistant", "jawaban")
-
-
-def test_parse_review_takes_last_verdict():
-    assert parse_review("REVISI\n- a") == ("REVISI", "- a")
-    assert parse_review("Awalnya REVISI tapi\nsetelah cek:\nLOLOS") == ("LOLOS", "")
-    assert parse_review("1. tambah test\n\nREVISI") == ("REVISI", "1. tambah test")
-    assert parse_review("tidak ada vonis")[0] is None
+    try:
+        assert c.send("buat result.txt", runner=run) == 0
+        assert (workspace / "result.txt").read_text(encoding="utf-8") == "approved\n"
+        assert len(calls) == 1 and ui.approvals[0]["requestMethod"] == "isolatedPatch/requestApproval"
+    finally:
+        c.close()
 
 
 def test_every_turn_carries_the_style_note():

@@ -28,12 +28,13 @@ SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 EFFORT_NAMES = {"auto": "Otomatis", "minimal": "Minimal", "low": "Low", "medium": "Medium", "high": "High",
                 "xhigh": "Extra High", "max": "Max", "ultra": "Ultra"}
 PACKAGE = Path(__file__).parent
-MODULES = ("paths", "config", "attach", "security", "failover", "routing_policy", "optimizer", "dispatch",
-           "learn", "history", "codex", "chat", "tui")
+MODULES = ("paths", "config", "attach", "security", "approval", "failover", "routing_policy", "optimizer",
+           "providers.common", "providers.claude", "providers.codex", "dispatch", "learn", "history",
+           "codex", "chat", "tui")
 
 
 def _watched() -> list[Path]:
-    return sorted(PACKAGE.glob("*.py")) + list(dict.fromkeys([
+    return sorted(PACKAGE.rglob("*.py")) + list(dict.fromkeys([
         config.PACKAGE_CONFIG, config.paths.config_dir() / "config.toml", config.config_path()]))
 
 
@@ -705,6 +706,7 @@ class CommandApproval(ModalScreen):
             "item/fileChange/requestApproval": "Codex meminta izin mengubah file",
             "item/permissions/requestApproval": "Codex meminta perluasan izin",
             "can_use_tool": "Claude meminta izin menggunakan alat",
+            "isolatedPatch/requestApproval": "Terapkan perubahan terisolasi ke workspace",
         }.get(method, "Provider meminta izin")
         with Vertical(id="approval"):
             yield Static(title)

@@ -65,14 +65,9 @@ Links to local files in chat open with their associated application; web links o
    means light.
 2. No keyword? A small local model ([Granite Embedding 97M](https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2))
    guesses. If it's not sure, it asks Haiku.
-3. Each tier goes to Claude or Codex, whichever I've used less today. Free providers, when
-   turned on, go first for light and medium.
+3. Each tier goes to an eligible provider with enough fresh 5-hour and weekly quota. When enough matching history
+   exists, reliability and p95 latency break ties; otherwise it falls back to recent success counts.
 4. If one fails, the next one takes over.
-5. In the chat, an answer from a top model (Claude Fable 5 or newer, Codex GPT-6-Astra or newer) is
-   held back and reviewed by a fresh run of the same model. It gets
-   revised until the review passes it, for at most 3 rounds, or until the model has less than 20% of
-   its 5-hour quota left. Only the final version is shown.
-
 The local model learns as you go. It learns from Haiku's answers, from random spot checks,
 and from you: switching the model after an answer counts as a correction.
 In chat, 10% of confident ML predictions are checked by Haiku in the background, including
@@ -94,8 +89,9 @@ answers and kept only if it scores better; otherwise the old one comes back. The
 - The default `full-access` mode never asks for permission: Claude runs with `bypassPermissions` and Codex with
   `danger-full-access` and approval `never`, like the IDE extensions in full-access mode. Choose a stricter mode
   below when a project needs a sandbox or prompts.
-- In `approval-required` mode, Claude and Codex tool, command, file-change and permission requests show one-time
-  allow/reject dialogs. Console-only clients decline requests they cannot show.
+- In chat `approval-required` runs changes in an isolated temporary workspace with network disabled. One diff is
+  shown after the turn and applied to the active project only when accepted. Concurrent target edits become conflicts;
+  console-only clients reject changes they cannot show. One-shot commands fall back to read-only.
 - Automatic failover happens only when a provider could not start. Once a turn was dispatched, AI Router
   stops instead of risking duplicate edits or external actions.
 - Messages sent while Claude or Codex is replying join the active work. A message arriving
@@ -120,14 +116,16 @@ dirs = [] # folders Claude may read without a prompt in the stricter modes
 |---|---|---|---|
 | `full-access` (default) | `--permission-mode bypassPermissions` | `danger-full-access`, approval `never` | none |
 | `workspace-write` | `--permission-mode auto` | `workspace-write`, `on-request` unless `confirm_destructive = false` | some |
-| `approval-required` | `--permission-mode manual` | `workspace-write`, `on-request` | yes |
+| `approval-required` | isolated restricted workspace | isolated `workspace-write` | final diff |
 | `read-only` | `--permission-mode plan`, Read/Grep/Glob only | `read-only` | none |
 
 `full-access` has no sandbox: the model can read, write, delete and run commands in any folder and reach the
-network, so `allow_network` and the roots do not limit it. The other modes keep the current project as the sandbox,
-plus `extra_write_roots`; in them `chat.dirs` become Claude `Read(...)` allow rules. `approval-required` routes
-provider approval requests to the UI. One-shot commands have no approval UI, so this mode becomes read-only there.
-In the sandboxed modes, Codex enforces `allow_network`; Claude's web tools are disabled when it is false.
+network, so `allow_network` and the roots do not limit it. `workspace-write` keeps the current project plus
+`extra_write_roots` as writable roots. In the stricter modes, `chat.dirs` become Claude `Read(...)` allow rules.
+`approval-required` does not expose the active project or extra write roots for writes: it produces a temporary
+isolated diff and checks target hashes again before applying. One-shot commands have no approval UI, so this mode
+becomes read-only there. In the sandboxed modes, Codex enforces `allow_network`; Claude runs restricted and its web
+tools are disabled when it is false.
 Path validation is defense in depth, not a replacement for the provider sandbox.
 
 Routing can downgrade after a self-contained topic change while short dependent follow-ups retain the previous
@@ -149,6 +147,10 @@ Runtime data is stored outside the installed package. On Windows the defaults ar
 
 Linux and macOS use the corresponding per-user configuration and data directories from `platformdirs`.
 Paths are only created when writing. Bundled configuration and seed labels remain package assets.
+
+Routes, quota, and optimizer telemetry do not contain raw prompts by default. They store a SHA-256 digest and
+character count. Prompts waiting for the local teacher are kept temporarily in `pending_prompts.jsonl` beside the
+route log and removed after they are learned. Set `[privacy].log_prompts = true` only when raw route logging is wanted.
 
 Configuration selection is `AI_ROUTER_CONFIG`, if set, then the user configuration, if present, then the
 bundled defaults. Missing keys in the selected configuration inherit bundled defaults; arrays replace the

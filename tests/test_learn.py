@@ -85,10 +85,8 @@ def test_audit_records_disagreement_and_learns(monkeypatch):
 
 
 def test_teach_labels_unlabeled_route_prompts(monkeypatch):
-    log = config.log_path()
-    log.write_text("\n".join(json.dumps({"prompt": p}) for p in
-                             ["halo", "/model heavy", "kenapa iso drop", "kenapa iso drop", "rename var"]),
-                   encoding="utf-8")
+    for prompt in ["halo", "/model heavy", "kenapa iso drop", "kenapa iso drop", "rename var"]:
+        learn.remember_prompt(prompt)
     seen = []
     monkeypatch.setattr(dispatch, "llm_classify_batch", lambda prompts, model: seen.extend(prompts) or
                         ["heavy" if "iso" in p else "light" for p in prompts])
@@ -305,9 +303,9 @@ def test_teacher_runs_on_its_own_once_enough_prompts_wait(monkeypatch):
     monkeypatch.setattr(learn, "teach_due", REAL_TEACH_DUE)
     monkeypatch.setattr(dispatch, "llm_classify_batch", lambda prompts, model: ["heavy"] * len(prompts))
     cfg = {**CFG, "classifier": {**CFG["classifier"], "teach_every": 2, "embed": False}}
-    config.log({"prompt": "rancang ulang modul pembayaran"})
+    learn.remember_prompt("rancang ulang modul pembayaran")
     assert learn.teach_if_due(cfg) is None
-    config.log({"prompt": "audit keamanan login"})
+    learn.remember_prompt("audit keamanan login")
     assert learn.teach_if_due(cfg) == 2
     assert learn.teach_lock().read_text(encoding="utf-8") == "done"
     config.log({"prompt": "migrasi database lama"})
@@ -334,7 +332,7 @@ def test_failed_teacher_batch_is_split_and_retried(monkeypatch):
 
     monkeypatch.setattr(dispatch, "llm_classify_batch", batch)
     for text in ("audit login", "migrasi db", "rancang modul", "analisa worker", "refactor parser"):
-        config.log({"prompt": text})
+        learn.remember_prompt(text)
     assert learn.teach(CFG, lambda text: None) == 5
     assert seen == [5, 2, 3, 1, 2]
 

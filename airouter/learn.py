@@ -81,6 +81,7 @@ MODEL_FILES = {"model.onnx": "onnx/model_quint8_avx2.onnx", "tokenizer.json": "t
 MAX_TOKENS = 512
 
 _lock = threading.Lock()
+_prompt_lock = threading.Lock()
 _encoder = None
 _failed = None
 _vectors = {}
@@ -540,6 +541,22 @@ def audit_path() -> Path:
     return labels_path().with_name("ml_audit.jsonl")
 
 
+def prompt_queue_path() -> Path:
+    return config.log_path().with_name("pending_prompts.jsonl")
+
+
+def remember_prompt(prompt: str):
+    text = prompt.strip()
+    if not text or text.startswith("/"):
+        return
+    path = prompt_queue_path()
+    row = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "prompt": text[:2000]}
+    with _prompt_lock:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
 def audit_due(cfg: dict) -> bool:
     return random.random() < cfg["classifier"].get("audit_rate", 0.1)
 
@@ -566,12 +583,29 @@ def audit_summary(last: int = 100) -> dict | None:
 def untaught(model: "Learner") -> list[str]:
     known = {_norm(r["text"]) for r in model.rows}
     prompts = []
-    for row in _jsonl(config.log_path()):
+    for row in _jsonl(prompt_queue_path()):
         text = str(row.get("prompt") or "").strip()
         if text and not text.startswith("/") and _norm(text) not in known:
             known.add(_norm(text))
             prompts.append(text)
     return prompts
+
+
+def _compact_prompt_queue(model: "Learner"):
+    path = prompt_queue_path()
+    if not path.exists():
+        return
+    known = {_norm(row["text"]) for row in model.rows}
+    with _prompt_lock:
+        rows = [row for row in _jsonl(path)
+                if _norm(str(row.get("prompt") or "")) not in known]
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        if rows:
+            temporary.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+                                 encoding="utf-8")
+            os.replace(temporary, path)
+        else:
+            path.unlink(missing_ok=True)
 
 
 def _labels(prompts: list[str], teacher: str) -> list[str | None]:
@@ -594,6 +628,7 @@ def teach(cfg: dict, info, batch: int = 25) -> int:
             if tier in TIERS:
                 model.add(text, tier, "teacher")
                 added += 1
+    _compact_prompt_queue(model)
     return added
 
 

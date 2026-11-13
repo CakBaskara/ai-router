@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import sys
@@ -54,6 +55,17 @@ def log(entry: dict):
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
+def prompt_log_fields(prompt: str, cfg: dict | None = None) -> dict:
+    privacy = (cfg or load()).get("privacy", {})
+    text = prompt[:500]
+    if privacy.get("log_prompts", False):
+        return {"prompt": text}
+    return {
+        "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "prompt_chars": len(prompt),
+    }
+
+
 def usage_today() -> Counter:
     path = log_path()
     today = date.today().isoformat()
@@ -70,6 +82,21 @@ def usage_today() -> Counter:
         if entry.get("exit") == 0 and entry.get("provider"):
             counts[entry["provider"]] += 1
     return counts
+
+
+def route_history(limit: int = 500) -> list[dict]:
+    path = log_path()
+    if not path.exists():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict) and row.get("provider"):
+            rows.append(row)
+    return rows[-limit:]
 
 
 QUOTA_WINDOWS = (("5h", "5j"), ("week", "mgg"))

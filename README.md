@@ -47,7 +47,8 @@ model and effort in one panel: ↑/↓ and Enter pick the model, ←/→ or a cl
 and the panel stays open until Esc. Ctrl+E and clicking the model chip open the same panel; `/effort high` and
 `/effort auto` work too. A pinned effort is fitted to the levels each model supports. Alt+V pastes a screenshot, and 📎 attaches a file. A pasted or dragged file path stays
 plain text. The ⟲ button, Ctrl+H, or `/history` opens the last 100 saved conversations; provider sessions and routing choices
-are restored when a conversation is continued. Type `/help` for the rest.
+are restored when a conversation is continued. `/history hapus 2 3` deletes saved conversations by number and
+`/history hapus semua` deletes all of them. Type `/help` for the rest.
 
 While a model works, its reply shows only a loading line with the elapsed time; when it is done, only its
 final answer appears, the text after its last tool call. Set `show_work = true` under `[chat]` to stream tool

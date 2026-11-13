@@ -105,12 +105,7 @@ def save(state: dict) -> bool:
                     "state": encoded_state,
                 }
                 rows = [row] + [item for item in rows if item.get("id") != history_id]
-                payload = json.dumps(rows[:MAX_ITEMS], ensure_ascii=False, separators=(",", ":"))
-                with temporary.open("w", encoding="utf-8", newline="") as handle:
-                    handle.write(payload)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temporary, target)
+                _write(rows[:MAX_ITEMS], target, temporary)
             return True
         except OSError:
             try:
@@ -118,3 +113,32 @@ def save(state: dict) -> bool:
             except OSError:
                 pass
             return False
+
+
+def _write(rows: list[dict], target: Path, temporary: Path):
+    payload = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+    with temporary.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, target)
+
+
+def delete(history_ids) -> int:
+    wanted = set(history_ids)
+    target = path()
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    with _lock:
+        try:
+            with _process_lock(target):
+                rows = _read()
+                kept = [row for row in rows if row["id"] not in wanted]
+                if len(kept) != len(rows):
+                    _write(kept, target, temporary)
+                return len(rows) - len(kept)
+        except OSError:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return 0

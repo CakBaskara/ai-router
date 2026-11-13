@@ -1136,8 +1136,14 @@ class ChatApp(App):
         elif name == "/history" and not text.partition(" ")[2].strip():
             self.action_history()
         elif name == "/history":
+            before = self.chat.history_id
             if self.chat.history_command(text.partition(" ")[2].strip()):
                 self.show_loaded_history()
+            elif self.chat.history_id != before:
+                self.queue.clear()
+                self.query_one("#log", VerticalScroll).remove_children()
+                self.refresh_status()
+                self.chat.prewarm()
         elif name == "/help":
             self.add_info(HELP)
         elif name == "/reload":

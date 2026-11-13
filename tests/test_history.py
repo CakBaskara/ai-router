@@ -70,6 +70,41 @@ def test_chat_can_resume_saved_conversation_and_new_keeps_the_old_one():
     assert chat.sessions == {"claude": "session-1"}
 
 
+def test_history_delete_removes_only_the_given_ids():
+    for number in range(3):
+        assert history.save(_state(str(number), f"prompt {number}"))
+    assert history.delete({"1", "missing"}) == 1
+    assert [row["id"] for row in history.entries()] == ["2", "0"]
+    assert history.delete(set()) == 0
+    assert not history.path().with_suffix(".json.tmp").exists()
+
+
+def test_history_command_deletes_by_number_and_all():
+    chat = Chat(CFG, use_llm=False)
+    for number in range(3):
+        assert history.save(_state(str(number), f"prompt {number}"))
+    newest_first = [row["id"] for row in history.entries()]
+
+    assert not chat.history_command("hapus 1 9")
+    assert [row["id"] for row in history.entries()] == newest_first[1:]
+
+    assert not chat.history_command("hapus semua")
+    assert history.entries() == []
+
+
+def test_deleting_the_open_conversation_clears_it_and_does_not_resave():
+    chat = Chat(CFG, use_llm=False)
+    chat.restore(_state())
+    assert chat.remember()
+    old_id = chat.history_id
+
+    assert not chat.history_command("hapus 1")
+    assert chat.history_id != old_id and chat.transcript == []
+    assert history.load(old_id) is None
+    chat.command("/history")
+    assert history.entries() == []
+
+
 def test_restore_rejects_invalid_persisted_fields():
     chat = Chat(CFG, use_llm=False)
     chat.restore({

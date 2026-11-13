@@ -20,6 +20,7 @@ HELP = (
     "/new                      percakapan baru\n"
     "/history                  buka atau tampilkan riwayat percakapan\n"
     "/history <nomor>          lanjutkan percakapan lama\n"
+    "/history hapus <nomor>    hapus riwayat (boleh beberapa nomor, atau: semua)\n"
     "/model                    tampilkan tier, provider, model\n"
     "/model light|medium|heavy kunci tier\n"
     "/model auto               kembali ke routing otomatis\n"
@@ -519,20 +520,46 @@ class Chat:
                 return False
             shown = [f"{i:>2}  {row.get('updated_at', '-')[:16].replace('T', ' ')}  {row.get('title', '-') }"
                      for i, row in enumerate(rows, 1)]
-            self.ui.info("\n".join(shown) + "\nlanjutkan: /history <nomor>")
+            self.ui.info("\n".join(shown) + "\nlanjutkan: /history <nomor>   hapus: /history hapus <nomor>|semua")
             return False
-        row = None
-        if arg.isdigit() and 1 <= int(arg) <= len(rows):
-            row = rows[int(arg) - 1]
-        else:
-            matches = [item for item in rows if item.get("id", "").startswith(arg)]
-            if len(matches) == 1:
-                row = matches[0]
+        words = arg.split()
+        if words[0] in ("hapus", "delete"):
+            self.delete_history(rows, words[1:])
+            return False
+        row = self._history_row(rows, arg)
         if not row or not self.load_history(row["id"]):
             self.ui.info(f"riwayat '{arg}' tidak ditemukan")
             return False
         self.ui.info(f"riwayat dimuat: {row.get('title', 'percakapan')}")
         return True
+
+    @staticmethod
+    def _history_row(rows: list[dict], key: str) -> dict | None:
+        if key.isdigit() and 1 <= int(key) <= len(rows):
+            return rows[int(key) - 1]
+        matches = [item for item in rows if item.get("id", "").startswith(key)]
+        return matches[0] if len(matches) == 1 else None
+
+    def delete_history(self, rows: list[dict], keys: list[str]):
+        if not keys:
+            self.ui.info("pakai: /history hapus <nomor ...> atau /history hapus semua")
+            return
+        if keys == ["semua"]:
+            found = rows
+            missing = []
+        else:
+            picked = [(key, self._history_row(rows, key)) for key in keys]
+            found = [row for _, row in picked if row]
+            missing = [key for key, row in picked if not row]
+        ids = {row["id"] for row in found}
+        removed = history.delete(ids) if ids else 0
+        if self.history_id in ids:
+            self.transcript = []
+            self.reset()
+        if removed:
+            self.ui.info(f"{removed} riwayat dihapus")
+        if missing:
+            self.ui.info("tidak ditemukan: " + ", ".join(missing))
 
     def route(self, msg: str) -> tuple[str, list[str], bool]:
         if self.pinned_tier:

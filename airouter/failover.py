@@ -127,6 +127,16 @@ def workspace_snapshot(root: Path, max_files: int = 20_000,
         return WorkspaceSnapshot(root, (), (), complete=False)
 
 
+def attempt_snapshot(root: Path, max_file_bytes: int = 16 * 1024 * 1024) -> WorkspaceSnapshot:
+    root = root.resolve()
+    if not any((candidate / ".git").exists() for candidate in (root, *root.parents)):
+        return WorkspaceSnapshot(root, (), (), complete=False)
+    try:
+        return _git_snapshot(root, max_file_bytes) or WorkspaceSnapshot(root, (), (), complete=False)
+    except (OSError, subprocess.SubprocessError):
+        return WorkspaceSnapshot(root, (), (), complete=False)
+
+
 def changed_files(before: WorkspaceSnapshot, after: WorkspaceSnapshot) -> tuple[str, ...]:
     before_files = dict(before.files)
     after_files = dict(after.files)

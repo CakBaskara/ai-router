@@ -601,6 +601,12 @@ class Chat:
             self._isolation = approval.IsolatedWorkspace(self.policy.workspace, self.policy.read_roots)
         return self._isolation.policy
 
+    @staticmethod
+    def _attempt_snapshot(policy: SecurityPolicy) -> failover.WorkspaceSnapshot:
+        if policy.mode is Mode.FULL_ACCESS:
+            return failover.WorkspaceSnapshot(policy.workspace, (), (), complete=False)
+        return failover.attempt_snapshot(policy.workspace)
+
     def route_for(self, tier: str, provider: str) -> dict:
         route = dict(self.cfg["tiers"][tier][provider])
         if self.pinned_model and provider == self.pinned_provider:
@@ -717,7 +723,7 @@ class Chat:
                 prompt = CHAT_NOTE + prompt
             turn = TURNS[provider]()
             started = time.time()
-            baseline = failover.workspace_snapshot(policy.workspace)
+            baseline = self._attempt_snapshot(policy)
             self._attempt_dispatched = False
             try:
                 code = self._run(provider, route, prompt, turn, runner, attachments)
@@ -768,7 +774,7 @@ class Chat:
                 self.learn_later()
                 return code
             fallback = providers[i + 1] if i < len(providers) - 1 else None
-            current = failover.workspace_snapshot(policy.workspace)
+            current = self._attempt_snapshot(policy)
             attempt = failover.classify_attempt(code, self._attempt_dispatched, self._cancelled, baseline, current)
             safe_retry = bool(fallback and failover.auto_retry_allowed(attempt))
             if fallback and not safe_retry:

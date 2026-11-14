@@ -682,3 +682,32 @@ def test_claude_usage_endpoint_maps_to_quota_windows():
     config.save_quota("claude", windows)
     assert config.quota_line() == "claude 5j 54% · mgg 64%"
     assert config.claude_usage_windows({}) == {}
+
+
+
+def test_handoff_survives_history_restore_and_failed_provider_turn(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    c = chat()
+    c.cfg = {**c.cfg, "handoff": {"enabled": True}}
+    run, _ = fake_runner([(0, claude_reply("Baseline passed")), (1, [])])
+    assert c.send("Run baseline", runner=run) == 0
+    c.command("/handoff Inspect the build log before retrying")
+    assert c.send("Build second image", runner=run) == 1
+
+    resumed = chat()
+    resumed.cfg = c.cfg
+    assert resumed.load_history(c.history_id)
+    resumed.command("/codex")
+    run, calls = fake_runner([(0, codex_reply("Ready")), (0, codex_reply("Done"))])
+    assert resumed.send("Continue", runner=run) == 0
+    prompt = calls[0][1]
+    assert "Baseline passed" in prompt
+    assert "Build second image" in prompt and "Verify what happened before retrying" in prompt
+    assert "Inspect the build log before retrying" in prompt
+    assert resumed.send("Next", runner=run) == 0
+    assert "Prior work checkpoint" not in calls[1][1]
+
+    other = tmp_path / "other-worktree"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    assert not chat().load_history(c.history_id)

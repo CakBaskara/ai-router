@@ -1,14 +1,14 @@
 # ai-router
 
-I didn't want to burn Opus quota on "what's the git command for X". So `ai` looks at each
+I didn't want to burn Opus quota on "what's the git command for X". So `sela` looks at each
 prompt, guesses how hard it is, and sends it to the cheapest model that can handle it:
 Haiku or a small Codex model for small stuff, Opus or a big Codex model for real work.
 
 ```text
-> ai "apa itu decorator di python?"
+> sela "apa itu decorator di python?"
 → light · claude haiku (low) · light: apa itu
 
-> ai "kenapa frame ISO hilang tiap 10 detik? ini lognya ..."
+> sela "kenapa frame ISO hilang tiap 10 detik? ini lognya ..."
 → heavy · codex gpt-6.1-sol (high) · heavy: kenapa
 ```
 
@@ -31,16 +31,16 @@ py -m pip install -e .
 
 | Command | What it does |
 |---|---|
-| `ai` | Open the chat |
-| `ai "..."` | Ask once, get one answer |
-| `ai -t heavy "..."` | Force a tier: `light`, `medium`, `heavy` |
-| `ai -p codex "..."` | Force a provider |
-| `ai -n "..."` | Show the route only, don't run it |
-| `ai --ml` | See how the router's model is doing |
-| `ai --style` | How long and padded the chat answers are, per provider |
-| `ai --quota` | Claude and Codex usage left in the 5-hour and weekly windows |
-| `ai --eval-routing FILE.jsonl` | Evaluate routing against an independent holdout |
-| `ai --migrate-data` | Preview copying runtime data from the old installation |
+| `sela` | Open the chat |
+| `sela "..."` | Ask once, get one answer |
+| `sela -t heavy "..."` | Force a tier: `light`, `medium`, `heavy` |
+| `sela -p codex "..."` | Force a provider |
+| `sela -n "..."` | Show the route only, don't run it |
+| `sela --ml` | See how the router's model is doing |
+| `sela --style` | How long and padded the chat answers are, per provider |
+| `sela --quota` | Claude and Codex usage left in the 5-hour and weekly windows |
+| `sela --eval-routing FILE.jsonl` | Evaluate routing against an independent holdout |
+| `sela --migrate-data` | Preview copying runtime data from the old installation |
 
 In the chat, Enter sends, Shift+Enter adds a line, Esc or ■ stops an answer, and Ctrl+O picks a
 model and effort in one panel: ↑/↓ and Enter pick the model, ←/→ or a click on the slider set the effort,
@@ -60,6 +60,17 @@ reads, with the login in `~/.claude/.credentials.json`.
 
 Links to local files in chat open with their associated application; web links open in the default browser.
 
+## Keep a phone session alive
+
+Started over SSH (for example from Termius), `sela` runs the chat in a background session on the PC, so closing
+or minimizing the SSH app does not stop it. Type `sela` again over SSH to get the same screen back. Typing `sela`
+on the PC while that session is alive opens the same session there, and the phone is told it moved. `/exit`
+ends the background session. Without a live session, `sela` on the PC runs as a normal window.
+
+Only one screen is attached at a time. The session needs Windows 10 1809 or later (ConPTY) and is lost when the
+PC restarts; saved conversations remain in `/history`. Problems starting it are written to `session.log` in the
+runtime logs directory.
+
 ## How it decides
 
 1. Keywords first. "kenapa", "refactor" mean heavy; "bug", "fix" mean medium; "apa itu"
@@ -74,7 +85,7 @@ and from you: switching the model after an answer counts as a correction.
 In chat, 10% of confident ML predictions are checked by Haiku in the background, including
 follow-up messages. The check uses the ML prediction before the chat's minimum or retained
 tier is applied; pinned tiers, keyword decisions, and `--no-llm` skip these checks.
-Every 25 new prompts, Sonnet labels them in the background. `ai --learn` does it right away.
+Every 25 new prompts, Sonnet labels them in the background. `sela --learn` does it right away.
 
 ## How answers stay short
 
@@ -83,7 +94,7 @@ scored for padding (praise openers, "semoga membantu" closers, restating the que
 short questions) and for how you react next ("singkat aja", "maksudnya?", or stopping it with Esc).
 After 30 answers, Sonnet rewrites the note from the worst ones. The new note is tried on the next 30
 answers and kept only if it scores better; otherwise the old one comes back. The note lives in
-`style.md` in the runtime logs directory, and you can edit it yourself. `ai --style` shows the scores.
+`style.md` in the runtime logs directory, and you can edit it yourself. `sela --style` shows the scores.
 
 ## Good to know
 
@@ -167,14 +178,14 @@ The TUI watches both the defaults and user configuration for changes.
 | `AI_ROUTER_ATTACH` | Attachment directory |
 | `AI_ROUTER_MODELS` | Models directory; each model retains its own subdirectory |
 
-Set `AI_ROUTER_DATA_DIR` before migration or starting `ai` to keep large runtime files on another drive.
+Set `AI_ROUTER_DATA_DIR` before migration or starting `sela` to keep large runtime files on another drive.
 Individual path overrides take priority over this root. The selected overrides must also be present in future
 sessions. This change does not move provider-owned Claude or Codex session storage.
 
-Stop running `ai` sessions before migrating. Preview first:
+Stop running `sela` sessions before migrating. Preview first:
 
 ```powershell
-ai --migrate-data
+sela --migrate-data
 ```
 
 For a different old checkout, pass its logs directory with `--migrate-from "path\to\old\ai-router\logs"`.
@@ -183,7 +194,7 @@ old sibling `airouter/config.toml` as user configuration unless `AI_ROUTER_CONFI
 After reviewing the destinations, use the same options plus `--apply`:
 
 ```powershell
-ai --migrate-data --apply
+sela --migrate-data --apply
 ```
 
 Migration copies files and preserves originals as a backup. It never overwrites a destination: identical

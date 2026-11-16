@@ -379,3 +379,23 @@ def test_other_codex_approval_requests_reach_the_same_ui(server, method):
     server.finish()
     worker.join(3)
     assert result["code"] == 0
+
+
+def test_windows_sandbox_start_failure_is_reported_once():
+    turn = CodexTurn()
+    item = {"type": "commandExecution", "id": "c1", "command": "type in.txt", "status": "failed",
+            "exitCode": -1073741502, "aggregatedOutput": None}
+    kind, text = turn.feed_app("item/completed", {"item": item})
+    assert kind == "note" and "sandbox Windows" in text and turn.sandbox_failed
+    assert turn.feed_app("item/completed", {"item": {**item, "id": "c2"}}) is None
+    ok = CodexTurn()
+    assert ok.feed_app("item/completed", {"item": {**item, "exitCode": 0, "status": "completed"}}) is None
+    assert not ok.sandbox_failed
+
+
+def test_failed_file_change_is_not_shown_as_an_edit():
+    turn = CodexTurn()
+    change = {"type": "fileChange", "id": "f1", "changes": [{"path": "C:/w/w.txt"}], "status": "declined"}
+    assert turn.feed_app("item/completed", {"item": change}) == ("note", "edit w.txt gagal (declined)")
+    done = {**change, "status": "completed"}
+    assert turn.feed_app("item/completed", {"item": done}) == ("note", "edit w.txt")

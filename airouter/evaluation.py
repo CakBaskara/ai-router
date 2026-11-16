@@ -1,12 +1,13 @@
 import hashlib
 import json
 import math
+import random
 import subprocess
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-from . import config, learn
+from . import config, dispatch, learn, paths
 from .learn import TIERS, classify
 
 
@@ -103,10 +104,14 @@ def evaluate(rows: list[dict], cfg: dict) -> dict:
     heavy = sum(row["gold_tier"] == "heavy" for row, _, _ in predicted)
     severe = sum(row["gold_tier"] == "heavy" and tier == "light" for row, tier, _ in predicted)
     verified = sum(row.get("label_verified") is True for row in rows)
+    teacher = cfg["classifier"].get("teacher", "sonnet")
+    model_labeled = sum(row.get("label_verified") is not True and row.get("label_source") == "model"
+                        and row.get("label_model") not in (None, "", teacher) for row in rows)
     return {
         "samples": total,
         "verified_labels": verified,
-        "valid_holdout": not leaked and verified == total,
+        "model_labels": model_labeled,
+        "valid_holdout": not leaked and verified + model_labeled == total,
         "leaked_ids": leaked,
         "classification_accuracy": round(correct / total, 4),
         "accuracy_95ci": _wilson(correct, total),
@@ -138,3 +143,78 @@ def run(path: Path, cfg: dict) -> tuple[dict, Path]:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result, target
+
+
+SPOT_CHECK = 20
+
+
+def holdout_path() -> Path:
+    return paths.data_dir() / "routing_holdout.jsonl"
+
+
+def manifest_path() -> Path:
+    return paths.data_dir() / "routing_holdout.manifest.json"
+
+
+def candidate_prompts(model: learn.Learner, limit: int) -> list[str]:
+    trained = {_normalized(row["text"]) for row in model.rows}
+    seen, prompts = set(), []
+    sources = [row.get("prompt") for row in learn._jsonl(learn.prompt_queue_path())]
+    sources += [row.get("prompt") for row in learn._jsonl(config.log_path())]
+    for text in sources:
+        text = str(text or "").strip()
+        key = _normalized(text)
+        if not text or text.startswith("/") or not key or key in trained or key in seen:
+            continue
+        seen.add(key)
+        prompts.append(text)
+    return prompts[:limit]
+
+
+def spot_check(rows: list[dict], digest: str, count: int = SPOT_CHECK) -> list[dict]:
+    picked = random.Random(digest).sample(range(len(rows)), min(count, len(rows)))
+    return [rows[i] for i in sorted(picked)]
+
+
+def build_holdout(cfg: dict, limit: int = 100, info=lambda _: None, labeler_fn=None) -> dict:
+    target, manifest = holdout_path(), manifest_path()
+    if target.exists() or manifest.exists():
+        raise ValueError(f"holdout sudah dibekukan: {target}")
+    labeler = cfg["classifier"].get("holdout_labeler", "opus")
+    teacher = cfg["classifier"].get("teacher", "sonnet")
+    if labeler == teacher:
+        raise ValueError("pelabel holdout harus berbeda dari model guru")
+    prompts = candidate_prompts(learn.Learner.load(), limit)
+    if not prompts:
+        raise ValueError("tidak ada prompt yang belum dipakai untuk training")
+    labeler_fn = labeler_fn or dispatch.llm_classify_batch
+    created = datetime.now().astimezone().isoformat(timespec="seconds")
+    rows = []
+    for start in range(0, len(prompts), 25):
+        chunk = prompts[start:start + 25]
+        info(f"{labeler} melabeli {start + len(chunk)}/{len(prompts)} prompt...")
+        for text, tier in zip(chunk, labeler_fn(chunk, labeler)):
+            if tier in TIERS:
+                rows.append({"id": hashlib.sha256(_normalized(text).encode("utf-8")).hexdigest()[:12],
+                             "prompt": text, "gold_tier": tier, "task_group": "local-prompts",
+                             "source": "local-prompts", "label_source": "model", "label_model": labeler,
+                             "label_verified": False, "created_at": created})
+    if not rows:
+        raise ValueError(f"{labeler} tidak memberi label yang valid")
+    raw = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows).encode("utf-8")
+    digest = hashlib.sha256(raw).hexdigest()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(raw)
+    summary = {"dataset": str(target), "dataset_sha256": digest, "created_at": created,
+               "label_model": labeler, "teacher": teacher, "candidates": len(prompts), "samples": len(rows),
+               "spot_check_ids": [row["id"] for row in spot_check(rows, digest)]}
+    manifest.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    return summary
+
+
+def frozen_spot_check() -> tuple[dict, list[dict]]:
+    manifest = json.loads(manifest_path().read_text(encoding="utf-8"))
+    if hashlib.sha256(holdout_path().read_bytes()).hexdigest() != manifest["dataset_sha256"]:
+        raise ValueError("holdout berubah sejak dibekukan; hash tidak cocok")
+    wanted = set(manifest["spot_check_ids"])
+    return manifest, [row for row in load_dataset(holdout_path()) if row["id"] in wanted]

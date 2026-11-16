@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import approval, attach, config, dispatch, failover, history, learn, optimizer
+from . import approval, attach, config, dispatch, failover, history, learn, optimizer, session
 from .dispatch import CodexProc
 from .config import log, say, usage_today
 from .learn import TIERS, classify
@@ -35,7 +35,7 @@ HELP = (
     "Baris diakhiri \\ untuk lanjut ke baris berikutnya; teks yang di-paste ikut terkirim utuh."
 )
 CHAT_NOTE = (
-    "[Context from the `ai` chat app, not from the user] You are answering inside `ai`, the user's terminal chat "
+    "[Context from the `sela` chat app, not from the user] You are answering inside `sela`, the user's terminal chat "
     "that routes each message to Claude Code or Codex CLI and picks the model automatically. "
     "Other assistants may have answered earlier turns; treat their answers as part of this conversation. You cannot switch "
     "models yourself. If the user wants another model, tell them to type /models for the list, /model <number or "
@@ -163,6 +163,17 @@ class ClaudeTurn(Segments):
         return "".join(self.reply).strip()
 
 
+WINDOWS_SANDBOX_EXIT = {-1073741502, 3221225794}
+SANDBOX_FAILED = ("sandbox Windows Codex gagal menjalankan perintah; mode keamanan ini tidak bisa dipakai "
+                  "di mesin ini, dan klaim Codex soal file yang dibuat belum tentu benar")
+
+
+def _sandbox_failed(item: dict) -> bool:
+    code = item.get("exitCode", item.get("exit_code"))
+    output = str(item.get("aggregatedOutput") or item.get("aggregated_output") or "").lower()
+    return code in WINDOWS_SANDBOX_EXIT or "windows sandbox failed" in output or "runner pipe-in" in output
+
+
 class CodexTurn(Segments):
     def __init__(self):
         self.session = None
@@ -172,6 +183,7 @@ class CodexTurn(Segments):
         self.error = None
         self.parts = []
         self.streamed = set()
+        self.sandbox_failed = False
 
     def feed(self, ev: dict):
         kind = ev.get("type")
@@ -204,10 +216,15 @@ class CodexTurn(Segments):
             self._split()
             self._say(item.get("text", ""))
             return "text", prefix + item.get("text", "")
+        elif kind == "item.completed" and itype == "command_execution" and _sandbox_failed(item):
+            if not self.sandbox_failed:
+                self.sandbox_failed = True
+                return "note", SANDBOX_FAILED
         elif kind == "item.completed" and itype == "file_change":
             self._split()
             paths = ", ".join(os.path.basename(c.get("path", "")) for c in item.get("changes", []))
-            return "note", _short(f"edit {paths}")
+            status = item.get("status", "completed")
+            return "note", _short(f"edit {paths}" if status == "completed" else f"edit {paths} gagal ({status})")
         elif kind == "item.completed" and itype == "error":
             return "note", _short(item.get("message", ""), 200)
         elif kind == "turn.completed":
@@ -488,6 +505,7 @@ class Chat:
         self.provider = None
         self.model = None
         self.sessions = {}
+        self.order_note = ""
         self.synced = {}
         self.transcript = []
         self.last_reply = None
@@ -585,13 +603,30 @@ class Chat:
         return decision.effective_tier, reasons, llm
 
     def order(self, tier: str) -> list[str]:
+        ranked = optimizer.rank_candidates(self.cfg, self.pinned_provider or self.provider, usage_today(),
+                                           config.load_quota(), config.route_history(), tier)
+        self.last_candidates = [] if self.pinned_provider else [c.log_data() for c in ranked]
+        low = {c.provider for c in ranked if c.below_reserve}
+        providers = [c.provider for c in ranked]
+        self.order_note = ""
         if self.pinned_provider:
-            self.last_candidates = []
-            return [self.pinned_provider]
-        ranked = optimizer.rank_candidates(self.cfg, self.provider, usage_today(), config.load_quota(),
-                                           config.route_history(), tier)
-        self.last_candidates = [candidate.log_data() for candidate in ranked]
-        return [candidate.provider for candidate in ranked]
+            spare = next((p for p in providers if p != self.pinned_provider and p not in low), None)
+            if self.pinned_provider in low and spare:
+                providers = [spare, self.pinned_provider]
+                self.order_note = f"kuota {self.pinned_provider} tinggal ≤ cadangan; pesan ini ke {spare}"
+            else:
+                providers = [self.pinned_provider]
+        if (providers[0] == "codex" and self.policy.mode is not Mode.FULL_ACCESS
+                and session.non_interactive()):
+            others = [c.provider for c in ranked if c.provider != "codex"]
+            if others:
+                providers = others + ["codex"]
+                self.order_note = (f"Codex tidak bisa menjalankan perintah di mode {self.policy.mode.value} "
+                                   f"lewat sesi non-interaktif (SSH); pesan ini ke {others[0]}")
+                if others[0] in low:
+                    self.order_note += (f". Kuota {others[0]} juga tinggal ≤ cadangan; bila habis, pakai "
+                                        "mode full-access atau tunggu reset")
+        return providers
 
     def _started(self, proc):
         self._attempt_dispatched = True
@@ -738,6 +773,8 @@ class Chat:
         style, note = learn.style_note()
         tier, reasons, llm = self.route(msg)
         providers = self.order(tier)
+        if self.order_note:
+            self.ui.info(self.order_note)
         code = 1
         for i, provider in enumerate(providers):
             if self.injected:
@@ -1095,7 +1132,7 @@ def read_message(label: str) -> str | None:
 
 def run(cfg: dict, provider: str | None = None, tier: str | None = None, use_llm: bool = True) -> int:
     chat = Chat(cfg, provider, tier, use_llm)
-    say(f"ai chat · {os.getcwd()} · keamanan {chat.policy.mode.value} · /help")
+    say(f"sela chat · {os.getcwd()} · keamanan {chat.policy.mode.value} · /help")
     try:
         return _loop(chat)
     finally:

@@ -171,7 +171,7 @@ def migrate_data(source_dir: Path | None = None, *, apply: bool = False) -> list
                 output.flush()
                 os.fsync(output.fileno())
             if _digest(temporary) != entry.digest or _digest(entry.source) != entry.digest:
-                raise ValueError("sumber berubah selama migrasi; hentikan ai lalu ulangi")
+                raise ValueError("sumber berubah selama migrasi; hentikan sela lalu ulangi")
             shutil.copystat(entry.source, temporary)
             _check_target(entry.target)
             try:

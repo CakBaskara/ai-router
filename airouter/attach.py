@@ -56,6 +56,10 @@ def from_clipboard() -> list[Path]:
     return [dest]
 
 
+def has_desktop_dialog() -> bool:
+    return not any(os.environ.get(name) for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"))
+
+
 def pick_files() -> list[Path]:
     import tkinter
     from tkinter import filedialog

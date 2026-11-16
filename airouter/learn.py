@@ -582,6 +582,7 @@ def audit_summary(last: int = 100) -> dict | None:
 
 def untaught(model: "Learner") -> list[str]:
     known = {_norm(r["text"]) for r in model.rows}
+    known |= {_norm(str(r.get("prompt", ""))) for r in _jsonl(paths.data_dir() / "routing_holdout.jsonl")}
     prompts = []
     for row in _jsonl(prompt_queue_path()):
         text = str(row.get("prompt") or "").strip()
@@ -841,7 +842,8 @@ def style_report(last: int = 200) -> dict:
     return {"replies": len(replies), "groups": out, "active": active, "trial": testing}
 
 
-STYLE_HEAD = "[Reply style from `ai`, not from the user] "
+STYLE_HEAD = "[Reply style from `sela`, not from the user] "
+OLD_STYLE_HEAD = "[Reply style from `ai`, not from the user] "
 DEFAULT_STYLE = (
     "Put the answer in your first sentence. Fit the length to the question: a simple question gets one to three "
     "sentences. No opening praise or \"Tentu\", no restating the question, no closing summary or \"semoga "
@@ -954,8 +956,9 @@ def _clean_note(text: str | None) -> str | None:
     if not text:
         return None
     text = text.strip().strip("`").strip()
-    if text.startswith(STYLE_HEAD.strip()):
-        text = text[len(STYLE_HEAD.strip()):].strip()
+    for head in (STYLE_HEAD.strip(), OLD_STYLE_HEAD.strip()):
+        if text.startswith(head):
+            text = text[len(head):].strip()
     return text if 0 < len(text) <= STYLE_MAX_CHARS else None
 
 

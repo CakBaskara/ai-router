@@ -7,7 +7,7 @@ from PIL import Image
 from airouter import attach, config, dispatch
 from airouter.chat import Chat, image_blocks, with_files
 from airouter.security import Mode, SecurityPolicy
-from airouter.tui import ChatApp, Composer, UserBubble
+from airouter.tui import ChatApp, Composer, FilePicker, UserBubble
 
 CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing", "loop")}, "providers": ["claude", "codex"]}
 
@@ -155,6 +155,8 @@ def test_clipboard_image_is_attached(monkeypatch, tmp_path):
 def test_clip_button_attaches_picked_files(monkeypatch, tmp_path):
     async def go():
         app = make_app()
+        for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"):
+            monkeypatch.delenv(name, raising=False)
         monkeypatch.setattr(attach, "pick_files", lambda: [png(tmp_path / "a.png"), png(tmp_path / "b.png")])
         async with app.run_test(size=(100, 30)) as pilot:
             clip = app.query_one("#clip")
@@ -166,4 +168,56 @@ def test_clip_button_attaches_picked_files(monkeypatch, tmp_path):
                     break
             assert [f.name.split("-", 2)[-1] for f in app.attachments] == ["a.png", "b.png"]
             assert clip.region.right <= 100
+    asyncio.run(go())
+
+
+def test_clip_button_over_ssh_opens_in_terminal_picker_and_attaches(monkeypatch, tmp_path):
+    async def go():
+        app = make_app()
+        monkeypatch.setenv("SSH_CONNECTION", "100.64.0.2 5000 100.64.0.1 22")
+        monkeypatch.chdir(tmp_path)
+        png(tmp_path / "a.png")
+        monkeypatch.setattr(attach, "pick_files", lambda: (_ for _ in ()).throw(AssertionError("native dialog opened")))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.click("#clip")
+            await pilot.pause(0.3)
+            assert isinstance(app.screen, FilePicker)
+            await pilot.press("down", "enter")
+            for _ in range(40):
+                await pilot.pause(0.05)
+                if app.attachments:
+                    break
+            assert [f.name.split("-", 2)[-1] for f in app.attachments] == ["a.png"]
+            assert not isinstance(app.screen, FilePicker)
+    asyncio.run(go())
+
+
+def test_in_terminal_picker_close_button_closes_without_attaching(monkeypatch, tmp_path):
+    async def go():
+        app = make_app()
+        monkeypatch.setenv("SSH_CONNECTION", "100.64.0.2 5000 100.64.0.1 22")
+        monkeypatch.chdir(tmp_path)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.click("#clip")
+            await pilot.pause(0.2)
+            await pilot.click("#file-close")
+            await pilot.pause(0.2)
+            assert not isinstance(app.screen, FilePicker) and app.attachments == []
+    asyncio.run(go())
+
+
+def test_failed_native_dialog_falls_back_to_in_terminal_picker(monkeypatch, tmp_path):
+    async def go():
+        app = make_app()
+        for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(attach, "pick_files", lambda: (_ for _ in ()).throw(RuntimeError("no display")))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.click("#clip")
+            for _ in range(40):
+                await pilot.pause(0.05)
+                if isinstance(app.screen, FilePicker):
+                    break
+            assert isinstance(app.screen, FilePicker)
     asyncio.run(go())

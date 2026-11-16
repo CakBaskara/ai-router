@@ -18,7 +18,7 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.theme import Theme
 from textual.widget import Widget
-from textual.widgets import Button, Markdown, Static, TextArea, Tree
+from textual.widgets import Button, DirectoryTree, Markdown, Static, TextArea, Tree
 
 from . import attach, config, dispatch, learn
 from .chat import HELP, Chat
@@ -147,6 +147,13 @@ CommandApproval { align: center middle; background: #000000 50%; }
 #history-picker { width: 76; height: 80%; border: round #454545; background: #202020; padding: 0 2; }
 #history-tree { height: 1fr; border: none; background: #202020; color: #CCCCCC; padding: 0; }
 #history-tree > .tree--cursor { background: #04395E; color: #FFFFFF; }
+FilePicker { align: center middle; background: #000000 50%; }
+#file-picker { width: 76; max-width: 96%; height: 80%; border: round #454545; background: #202020; padding: 0 2; }
+#file-tree { height: 1fr; border: none; background: #202020; color: #CCCCCC; padding: 0; }
+#file-tree > .tree--cursor { background: #04395E; color: #FFFFFF; }
+#file-actions { height: 3; }
+#file-up, #file-close { width: 1fr; height: 3; color: #D4D4D4; text-style: bold; content-align: center middle; }
+#file-up:hover, #file-close:hover { color: #FFFFFF; background: #2B2B2B; }
 #quota-popup { width: 54; height: auto; margin: 3 2 0 0; border: round #454545; background: #202020; padding: 1 2; }
 #quota-title { color: #CCCCCC; text-style: bold; }
 #quota-details { color: #CCCCCC; margin-top: 1; }
@@ -666,6 +673,47 @@ class HistoryPicker(ModalScreen):
             self.dismiss(event.node.data)
 
 
+class FileUpButton(Static):
+    def on_click(self):
+        self.screen.action_up()
+
+
+class FileCloseButton(Static):
+    def on_click(self):
+        self.screen.action_close()
+
+
+class FilePicker(ModalScreen):
+    BINDINGS = [Binding("escape", "close", "Tutup"), Binding("backspace", "up", "Folder atas")]
+
+    def __init__(self, start: Path):
+        super().__init__()
+        self.start = start
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="file-picker"):
+            yield Static("Lampirkan file", id="picker-title")
+            yield DirectoryTree(self.start, id="file-tree")
+            with Horizontal(id="file-actions"):
+                yield FileUpButton("▲ Folder atas", id="file-up")
+                yield FileCloseButton("✕ Tutup", id="file-close")
+            yield Static("Ketuk atau Enter pilih · Esc tutup", id="picker-hint")
+
+    def on_mount(self):
+        self.query_one(DirectoryTree).focus()
+
+    def action_up(self):
+        tree = self.query_one(DirectoryTree)
+        tree.path = Path(tree.path).parent
+
+    def action_close(self):
+        self.dismiss(None)
+
+    def on_directory_tree_file_selected(self, event: DirectoryTree.FileSelected):
+        event.stop()
+        self.dismiss(Path(event.path))
+
+
 class QuotaPopup(ModalScreen):
     BINDINGS = [Binding("escape", "close", "Tutup")]
 
@@ -775,7 +823,7 @@ class TuiUI:
 
 class ChatApp(App):
     CSS = CSS
-    TITLE = "ai"
+    TITLE = "sela"
     BINDINGS = [
         Binding("escape", "cancel", "Batal"),
         Binding("ctrl+o", "models", "Model"),
@@ -808,7 +856,7 @@ class ChatApp(App):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="top"):
-            yield Static("✻ ai", id="brand")
+            yield Static("✻ sela", id="brand")
             yield Static(os.getcwd(), id="cwd", markup=False)
             yield HistoryButton("⟲", id="history", markup=False)
             yield QuotaButton("◎", id="quota", markup=False)
@@ -1086,8 +1134,22 @@ class ChatApp(App):
                 self.notify(f"Tidak bisa melampirkan {path.name}: {exc}", severity="warning")
         self.refresh_files()
 
-    @work(thread=True)
     def pick_files(self):
+        if attach.has_desktop_dialog():
+            self.pick_native()
+        else:
+            self.open_file_picker()
+
+    def open_file_picker(self):
+        if not isinstance(self.screen, FilePicker):
+            self.push_screen(FilePicker(Path.cwd()), self.attach_picked)
+
+    def attach_picked(self, path):
+        if path:
+            self.attach_files([path])
+
+    @work(thread=True)
+    def pick_native(self):
         if self.picking:
             return
         self.picking = True
@@ -1095,6 +1157,7 @@ class ChatApp(App):
             paths = attach.pick_files()
         except Exception as exc:
             self.call_from_thread(self.notify, f"Dialog file gagal dibuka: {exc}", severity="warning")
+            self.call_from_thread(self.open_file_picker)
             return
         finally:
             self.picking = False

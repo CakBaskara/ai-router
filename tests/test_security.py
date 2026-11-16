@@ -46,6 +46,7 @@ def test_approval_mode_routes_prompts_to_host_and_blocks_web_tools(tmp_path):
     claude = dispatch.chat_cmd("claude", "sonnet", "low", None, policy=selected)
     assert claude[claude.index("--permission-mode") + 1] == "manual"
     assert claude[claude.index("--permission-prompts") + 1] == "host"
+    assert claude[claude.index("--permission-prompt-tool") + 1] == "stdio"
     assert claude[claude.index("--disallowedTools") + 1] == "WebFetch,WebSearch"
     codex = dispatch.chat_cmd("codex", "model", "low", None, policy=selected)
     assert 'approval_policy="on-request"' in codex
@@ -180,6 +181,7 @@ def test_isolated_policy_disables_network_and_nested_prompts(tmp_path):
         claude = dispatch.chat_cmd("claude", "sonnet", "low", None, policy=selected)
         assert "--restricted" in claude
         assert claude[claude.index("--permission-prompts") + 1] == "none"
+        assert "--permission-prompt-tool" not in claude
     finally:
         isolated.close()
 

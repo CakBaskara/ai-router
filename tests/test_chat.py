@@ -682,3 +682,59 @@ def test_claude_usage_endpoint_maps_to_quota_windows():
     config.save_quota("claude", windows)
     assert config.quota_line() == "claude 5j 54% · mgg 64%"
     assert config.claude_usage_windows({}) == {}
+
+
+def _low_quota(monkeypatch, provider):
+    now = time.time()
+    monkeypatch.setattr(config, "load_quota", lambda: {provider: {"at": now, "5h": {"used": 90}}})
+
+
+def test_pinned_provider_moves_aside_when_its_quota_is_at_the_reserve(monkeypatch):
+    from airouter import session
+    monkeypatch.setattr(session, "non_interactive", lambda: False)
+    _low_quota(monkeypatch, "codex")
+    c = Chat(CFG, use_llm=False)
+    c.command("/codex")
+    assert c.order("heavy") == ["claude", "codex"]
+    assert "codex" in c.order_note and "claude" in c.order_note
+
+
+def test_pinned_provider_stays_when_every_provider_is_low(monkeypatch):
+    from airouter import session
+    monkeypatch.setattr(session, "non_interactive", lambda: False)
+    now = time.time()
+    monkeypatch.setattr(config, "load_quota", lambda: {p: {"at": now, "5h": {"used": 95}} for p in ("claude", "codex")})
+    c = Chat(CFG, use_llm=False)
+    c.command("/codex")
+    assert c.order("heavy") == ["codex"]
+
+
+def test_strict_mode_in_session_zero_sends_codex_turns_to_claude(monkeypatch):
+    from airouter import session
+    monkeypatch.setattr(session, "non_interactive", lambda: True)
+    monkeypatch.setattr(config, "load_quota", lambda: {})
+    cfg = {**CFG, "security": {"mode": "workspace-write"}}
+    c = Chat(cfg, use_llm=False)
+    c.command("/codex")
+    assert c.order("heavy") == ["claude", "codex"]
+    assert "SSH" in c.order_note
+
+
+def test_strict_mode_in_session_zero_warns_when_claude_is_also_low(monkeypatch):
+    from airouter import session
+    monkeypatch.setattr(session, "non_interactive", lambda: True)
+    _low_quota(monkeypatch, "claude")
+    cfg = {**CFG, "security": {"mode": "workspace-write"}}
+    c = Chat(cfg, use_llm=False)
+    c.command("/codex")
+    assert c.order("heavy")[0] == "claude"
+    assert "full-access" in c.order_note
+
+
+def test_full_access_in_session_zero_keeps_codex(monkeypatch):
+    from airouter import session
+    monkeypatch.setattr(session, "non_interactive", lambda: True)
+    monkeypatch.setattr(config, "load_quota", lambda: {})
+    c = Chat(CFG, use_llm=False)
+    c.command("/codex")
+    assert c.order("heavy") == ["codex"] and not c.order_note

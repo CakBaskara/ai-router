@@ -17,8 +17,9 @@ ml_min_labels = 30
 embed = true
 # Share of confident local decisions the model above re-checks in the background; disagreements become labels.
 audit_rate = 0.1
-# Stronger model that labels past prompts from routes.jsonl when `ai --ml-train` runs.
+# Stronger model that labels past prompts from routes.jsonl when `sela --ml-train` runs.
 teacher = "sonnet"
+holdout_labeler = "opus"
 # The teacher also runs on its own in the background once this many logged prompts have no label; 0 turns it off.
 teach_every = 25
 

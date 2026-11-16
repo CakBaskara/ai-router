@@ -19,9 +19,21 @@ def test_fresh_quota_below_reserve_moves_provider_to_the_end():
     assert rank_providers(CFG, sticky="claude", quota=quota, now=now) == ["codex", "claude"]
 
 
-def test_stale_quota_does_not_claim_a_provider_is_depleted():
+def test_quota_at_exactly_the_reserve_moves_provider_to_the_end():
+    quota = {"claude": {"at": 1_000, "5h": {"used": 85}}}
+    assert rank_providers(CFG, sticky="claude", quota=quota, now=1_000) == ["codex", "claude"]
+
+
+def test_stale_low_quota_still_counts_until_its_window_resets():
+    quota = {"claude": {"at": 1, "5h": {"used": 99, "resets": 5_000}}}
+    assert rank_providers(CFG, sticky="claude", quota=quota, now=1_000) == ["codex", "claude"]
+    assert rank_providers(CFG, sticky="claude", quota=quota, now=6_000) == ["claude", "codex"]
+
+
+def test_stale_quota_without_reset_time_expires_after_one_window():
     quota = {"claude": {"at": 1, "5h": {"used": 99}}}
-    assert rank_providers(CFG, sticky="claude", quota=quota, now=1_000) == ["claude", "codex"]
+    assert rank_providers(CFG, sticky="claude", quota=quota, now=1_000) == ["codex", "claude"]
+    assert rank_providers(CFG, sticky="claude", quota=quota, now=1 + 5 * 3600 + 1) == ["claude", "codex"]
 
 
 def test_sticky_provider_stays_first_when_it_has_reserve():

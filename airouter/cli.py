@@ -13,7 +13,7 @@ from .security import SecurityPolicy
 
 
 def _parse(argv):
-    p = argparse.ArgumentParser(prog="ai", description="Route a prompt to the cheapest model that can answer it. With no prompt, open a chat.")
+    p = argparse.ArgumentParser(prog="sela", description="Route a prompt to the cheapest model that can answer it. With no prompt, open a chat.")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("prompt", nargs="*", help="prompt text; read from stdin when omitted")
     p.add_argument("-i", "--interactive", action="store_true", help="open an interactive session in the current folder")
@@ -29,20 +29,29 @@ def _parse(argv):
     p.add_argument("--style", action="store_true", help="show how long and padded the chat answers are, per provider")
     p.add_argument("--quota", action="store_true", help="show the Claude and Codex usage left in the 5-hour and weekly windows")
     p.add_argument("--migrate-data", action="store_true", help="preview migration of legacy runtime data")
-    p.add_argument("--eval-routing", metavar="DATASET", help="evaluate routing against a frozen JSONL holdout")
+    p.add_argument("--eval-routing", metavar="DATASET", nargs="?", const="",
+                   help="evaluate routing against a frozen JSONL holdout (default: the built holdout)")
+    p.add_argument("--build-holdout", type=int, nargs="?", const=100, metavar="N",
+                   help="label up to N untrained prompts with the holdout model and freeze them (default 100)")
+    p.add_argument("--spot-check", action="store_true", help="print the frozen holdout samples to check by hand")
     p.add_argument("--migrate-from", type=str, help="legacy logs directory (requires --migrate-data)")
     p.add_argument("--apply", action="store_true", help="copy data after previewing --migrate-data; never overwrite")
+    p.add_argument("--no-host", action="store_true", help=argparse.SUPPRESS)
     args = p.parse_args(argv)
     if (args.apply or args.migrate_from) and not args.migrate_data:
         p.error("--apply and --migrate-from require --migrate-data")
     if args.apply and args.dry_run:
         p.error("--apply cannot be combined with --dry-run")
     if args.migrate_data and (args.prompt or args.interactive or args.quota or args.style or args.ml
-                              or args.ml_train or args.ml_auto or args.eval_routing):
+                              or args.ml_train or args.ml_auto or args.eval_routing is not None
+                              or args.build_holdout is not None or args.spot_check):
         p.error("--migrate-data cannot be combined with another action")
-    if args.eval_routing and (args.prompt or args.interactive or args.quota or args.style or args.ml
-                              or args.ml_train or args.ml_auto or args.dry_run):
-        p.error("--eval-routing cannot be combined with another action")
+    holdout_actions = [args.eval_routing is not None, args.build_holdout is not None, args.spot_check]
+    if any(holdout_actions) and (sum(holdout_actions) > 1 or args.prompt or args.interactive or args.quota
+                                 or args.style or args.ml or args.ml_train or args.ml_auto or args.dry_run):
+        p.error("--eval-routing, --build-holdout and --spot-check cannot be combined with another action")
+    if args.build_holdout is not None and not 1 <= args.build_holdout <= 100:
+        p.error("--build-holdout N must be between 1 and 100")
     return args
 
 
@@ -92,8 +101,9 @@ def main(argv=None) -> int:
     os.environ["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"] = "1"
     if sys.platform == "win32":
         import ctypes
-        ctypes.windll.kernel32.SetConsoleTitleW("AI-Router")
-    args = _parse(argv if argv is not None else sys.argv[1:])
+        ctypes.windll.kernel32.SetConsoleTitleW("sela")
+    argv = list(argv if argv is not None else sys.argv[1:])
+    args = _parse(argv)
     if args.migrate_data:
         from pathlib import Path
         entries = paths.migrate_data(Path(args.migrate_from) if args.migrate_from else None, apply=args.apply)
@@ -103,7 +113,7 @@ def main(argv=None) -> int:
             print(f"{entry.status}: {entry.source} -> {entry.target}{detail}")
         failed = any(entry.status in {"conflict", "error"} for entry in entries)
         if not args.apply:
-            print("Hentikan semua sesi ai, lalu jalankan lagi dengan --apply untuk menyalin.")
+            print("Hentikan semua sesi sela, lalu jalankan lagi dengan --apply untuk menyalin.")
         elif failed:
             print("Migrasi belum selesai. Selesaikan konflik/error lalu ulangi; file sumber tetap ada.")
         else:
@@ -112,10 +122,30 @@ def main(argv=None) -> int:
     cfg = config.load()
     policy = SecurityPolicy.from_config(cfg)
 
-    if args.eval_routing:
+    if args.build_holdout is not None:
+        try:
+            summary = evaluation.build_holdout(cfg, args.build_holdout, say)
+        except (OSError, ValueError) as exc:
+            print(f"Holdout gagal: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
+        return 0
+
+    if args.spot_check:
+        try:
+            manifest, rows = evaluation.frozen_spot_check()
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"Spot-check gagal: {exc}", file=sys.stderr)
+            return 2
+        print(f"{manifest['dataset']} · sha256 {manifest['dataset_sha256'][:12]} · label {manifest['label_model']}")
+        for number, row in enumerate(rows, 1):
+            print(f"{number:2}. [{row['gold_tier']}] {row['id']}  {' '.join(row['prompt'].split())[:160]}")
+        return 0
+
+    if args.eval_routing is not None:
         from pathlib import Path
         try:
-            report, saved = evaluation.run(Path(args.eval_routing), cfg)
+            report, saved = evaluation.run(Path(args.eval_routing or evaluation.holdout_path()), cfg)
         except (OSError, ValueError) as exc:
             print(f"Evaluasi gagal: {exc}", file=sys.stderr)
             return 2
@@ -155,6 +185,11 @@ def main(argv=None) -> int:
     elif not prompt and not args.interactive and not args.dry_run:
         if args.plain:
             return chat.run(cfg, provider=args.provider, tier=args.tier, use_llm=not args.no_llm)
+        if not args.no_host:
+            from . import session
+            code = session.enter(argv)
+            if code is not None:
+                return code
         from . import tui
         return tui.run(cfg, provider=args.provider, tier=args.tier, use_llm=not args.no_llm)
     if not prompt and not args.interactive:

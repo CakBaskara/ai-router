@@ -42,9 +42,26 @@ def _percentile(values: list[float], percentile: float) -> float | None:
     return round(ordered[index], 2)
 
 
+WINDOW_SECONDS = {"5h": 5 * 3600, "week": 7 * 86400}
+
+
 def _headroom(telemetry: dict, window: str, fresh: bool) -> int | None:
     used = (telemetry.get(window) or {}).get("used")
     return max(0, round(100 - used)) if fresh and isinstance(used, (int, float)) else None
+
+
+def _known_low(telemetry: dict, window: str, reserve: int, now: float) -> bool:
+    # Usage only grows until the window resets, so an old reading that was already low still holds.
+    data = telemetry.get(window) or {}
+    used, observed, resets = data.get("used"), telemetry.get("at"), data.get("resets")
+    if not isinstance(used, (int, float)) or not isinstance(observed, (int, float)):
+        return False
+    if isinstance(resets, (int, float)):
+        if resets <= now:
+            return False
+    elif now - observed > WINDOW_SECONDS[window]:
+        return False
+    return 100 - used <= reserve
 
 
 def candidates(cfg: dict, usage: dict | None = None, quota: dict | None = None,
@@ -78,8 +95,8 @@ def candidates(cfg: dict, usage: dict | None = None, quota: dict | None = None,
         actual = [row.get("actual_usage") or {} for row in rows]
         input_tokens = sum(int(row.get("input_tokens") or 0) for row in actual)
         output_tokens = sum(int(row.get("output_tokens") or 0) for row in actual)
-        below = ((five_hour is not None and five_hour < reserve)
-                 or (weekly is not None and weekly < weekly_reserve))
+        below = (_known_low(telemetry, "5h", reserve, now)
+                 or _known_low(telemetry, "week", weekly_reserve, now))
         unreliable = attempts >= minimum and rate is not None and rate < floor
         ranked.append(Candidate(
             provider=provider,

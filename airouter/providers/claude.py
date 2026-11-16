@@ -51,8 +51,11 @@ def build(model: str, effort: str, prompt: str, interactive: bool,
 
 
 def chat_command(model: str, effort: str, session: str | None, policy: SecurityPolicy) -> list[str]:
+    security = security_args(policy)
+    if security[security.index("--permission-prompts") + 1] == "host":
+        security += ["--permission-prompt-tool", "stdio"]
     command = executable() + [
-        "-p", "--model", model, "--effort", effort, *security_args(policy),
+        "-p", "--model", model, "--effort", effort, *security,
         "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
         "--include-partial-messages", "--replay-user-messages"]
     return command + (["--resume", session] if session else [])

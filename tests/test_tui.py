@@ -4,14 +4,15 @@ import threading
 import pytest
 
 from textual.app import App
+from textual.screen import ModalScreen
 from textual.widgets import Markdown, Static
 
 from airouter import config
 from airouter.chat import Chat
 from textual.containers import VerticalScroll
 
-from airouter.tui import (ChatApp, Composer, EffortPanel, HistoryPicker, ModelPicker, QuotaPopup, Reply,
-                          ScrollButton, UserBubble)
+from airouter.tui import (ChatApp, CommandApproval, Composer, EffortPanel, FilePicker, HistoryPicker,
+                          ModelPicker, QuotaPopup, Reply, ScrollButton, UserBubble)
 
 CFG = {**{k: v for k, v in config.load().items() if k not in ("chat", "routing", "loop")}, "providers": ["claude", "codex"]}
 
@@ -231,6 +232,26 @@ def test_picker_shows_provider_folders_in_order():
             names = [str(n.label).split()[0] for n in tree.root.children[1:]]
             assert names == ["Codex", "Claude"]
             assert not any(n.is_expanded for n in tree.root.children[1:])
+    asyncio.run(go())
+
+
+def test_popups_close_when_clicking_backdrop(tmp_path):
+    async def go():
+        app = make_app()
+        popups = [
+            ModelPicker(app.chat._catalog, "", True),
+            HistoryPicker([]),
+            FilePicker(tmp_path),
+            QuotaPopup(""),
+            CommandApproval({}),
+        ]
+        async with app.run_test(size=(100, 30)) as pilot:
+            for popup in popups:
+                app.push_screen(popup)
+                await pilot.pause()
+                await pilot.click(offset=(0, 0))
+                await pilot.pause()
+                assert not isinstance(app.screen, ModalScreen)
     asyncio.run(go())
 
 

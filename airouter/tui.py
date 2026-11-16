@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from rich.text import Text
-from textual import on, work
+from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -556,7 +556,13 @@ class EffortPanel(Vertical):
         self.choose()
 
 
-class ModelPicker(ModalScreen):
+class PopupScreen(ModalScreen):
+    def on_click(self, event: events.Click):
+        if event.widget is self:
+            self.action_close()
+
+
+class ModelPicker(PopupScreen):
     BINDINGS = [
         Binding("escape", "close", "Tutup"),
         Binding("home", "first", show=False, priority=True),
@@ -641,7 +647,7 @@ class ModelPicker(ModalScreen):
             self.query_one(EffortPanel).load(*self.app.effort_state())
 
 
-class HistoryPicker(ModalScreen):
+class HistoryPicker(PopupScreen):
     BINDINGS = [Binding("escape", "close", "Tutup")]
 
     def __init__(self, rows: list[dict]):
@@ -658,7 +664,7 @@ class HistoryPicker(ModalScreen):
         with Vertical(id="history-picker"):
             yield Static("Riwayat percakapan", id="picker-title")
             yield tree
-            yield Static("â†‘â†“ pilih Â· Enter lanjutkan Â· Esc tutup", id="picker-hint")
+            yield Static("↑↓ pilih · Enter lanjutkan · Esc tutup", id="picker-hint")
 
     def on_mount(self):
         tree = self.query_one(Tree)
@@ -683,7 +689,7 @@ class FileCloseButton(Static):
         self.screen.action_close()
 
 
-class FilePicker(ModalScreen):
+class FilePicker(PopupScreen):
     BINDINGS = [Binding("escape", "close", "Tutup"), Binding("backspace", "up", "Folder atas")]
 
     def __init__(self, start: Path):
@@ -714,7 +720,7 @@ class FilePicker(ModalScreen):
         self.dismiss(Path(event.path))
 
 
-class QuotaPopup(ModalScreen):
+class QuotaPopup(PopupScreen):
     BINDINGS = [Binding("escape", "close", "Tutup")]
 
     def __init__(self, line: str):
@@ -740,7 +746,7 @@ class QuotaPopup(ModalScreen):
         self.dismiss(None)
 
 
-class CommandApproval(ModalScreen):
+class CommandApproval(PopupScreen):
     BINDINGS = [Binding("escape", "reject", "Tolak")]
 
     def __init__(self, params):
@@ -766,6 +772,9 @@ class CommandApproval(ModalScreen):
 
     def action_reject(self):
         self.dismiss(False)
+
+    def action_close(self):
+        self.action_reject()
 
     def on_button_pressed(self, event: Button.Pressed):
         self.dismiss(event.button.id == "accept")

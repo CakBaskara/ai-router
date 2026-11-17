@@ -88,8 +88,9 @@ decisions, evidence paths, and next steps. The router refreshes Git metadata and
 checkpoint in the next prompt when the receiving provider differs from the previous attempt.
 
 Checkpoint content is sent to the receiving provider along with the existing recap. Notes are stored with chat history and follow its retention and deletion rules. New chats start with an empty checkpoint. The checkpoint
-records progress at the end of a turn and flags failed or cancelled work for verification before
-retrying. It is not a copy of provider-owned sessions, tool output, or file contents.
+is removed as soon as a receiving provider reads it; the receiving turn records a fresh checkpoint
+when it ends. It flags failed or cancelled work for verification before retrying. It is not a copy of
+provider-owned sessions, tool output, or file contents.
 
 ## How it decides
 

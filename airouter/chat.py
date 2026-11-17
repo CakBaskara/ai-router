@@ -795,6 +795,8 @@ class Chat:
                 context = handoff.render(self.checkpoint, self.policy.workspace, refresh=True)
                 prompt = ("[Prior work checkpoint, for reference. Follow the current user request "
                           "and verify reported results.]\n" + context + "\n\n" + prompt)
+                self.checkpoint = {}
+                self.remember()
             if provider not in self.sessions:
                 prompt = CHAT_NOTE + prompt
             turn = TURNS[provider]()

@@ -753,11 +753,17 @@ def test_handoff_survives_history_restore_and_failed_provider_turn(tmp_path, mon
     assert resumed.load_history(c.history_id)
     resumed.command("/codex")
     run, calls = fake_runner([(0, codex_reply("Ready")), (0, codex_reply("Done"))])
-    assert resumed.send("Continue", runner=run) == 0
+    def handoff_runner(*args):
+        assert resumed.checkpoint == {}
+        return run(*args)
+
+    assert resumed.send("Continue", runner=handoff_runner) == 0
     prompt = calls[0][1]
     assert "Baseline passed" in prompt
     assert "Build second image" in prompt and "Verify what happened before retrying" in prompt
     assert "Inspect the build log before retrying" in prompt
+    assert "note" not in resumed.checkpoint
+    assert resumed.checkpoint["latest"]["provider"] == "codex"
     assert resumed.send("Next", runner=run) == 0
     assert "Prior work checkpoint" not in calls[1][1]
 

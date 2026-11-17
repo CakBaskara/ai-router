@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import approval, attach, config, dispatch, failover, history, learn, optimizer, session
+from . import approval, attach, config, dispatch, failover, handoff, history, learn, optimizer, session
 from .dispatch import CodexProc
 from .config import log, say, usage_today
 from .learn import TIERS, classify
@@ -17,6 +17,7 @@ from .routing_policy import RoutingDecision, decide
 from .security import Mode, SecurityPolicy
 
 HELP = (
+    "/handoff [catatan]        lihat checkpoint atau simpan catatan\n"
     "/new                      percakapan baru\n"
     "/history                  buka atau tampilkan riwayat percakapan\n"
     "/history <nomor>          lanjutkan percakapan lama\n"
@@ -42,7 +43,7 @@ CHAT_NOTE = (
     "name> to pick one, or /model auto to go back to automatic routing; a short message such as \"pakai opus\" or "
     "\"ganti ke codex\" does the same. /new starts a new conversation.\n\n"
 )
-STATE = ("history_id", "tier", "provider", "model", "sessions", "synced", "transcript", "last_reply",
+STATE = ("history_id", "tier", "provider", "model", "sessions", "synced", "transcript", "last_reply", "checkpoint",
          "pinned_provider", "pinned_tier", "pinned_model", "pinned_effort")
 RECAP_ENTRIES = 12
 RECAP_CHARS = 2000
@@ -509,11 +510,14 @@ class Chat:
         self.synced = {}
         self.transcript = []
         self.last_reply = None
+        self.checkpoint = {}
         self.last_routing = None
         self.last_candidates = []
 
     def persistent_state(self) -> dict:
-        return {k: getattr(self, k) for k in STATE}
+        state = {k: getattr(self, k) for k in STATE}
+        state["workspace"] = str(self.policy.workspace) if self.checkpoint else None
+        return state
 
     def remember(self) -> bool:
         return history.save(self.persistent_state())
@@ -524,6 +528,9 @@ class Chat:
     def load_history(self, history_id: str) -> bool:
         state = history.load(history_id)
         if not state:
+            return False
+        if state.get("workspace") and state["workspace"] != str(self.policy.workspace):
+            self.ui.info("riwayat ini milik workspace lain")
             return False
         self.remember()
         self.close()
@@ -783,6 +790,11 @@ class Chat:
             self.ui.start(tier, provider, route, reasons)
             unseen = self.transcript[self.synced.get(provider, 0):]
             prompt = (recap(unseen) if unseen else "") + note + msg
+            if (self.cfg.get("handoff", {}).get("enabled", False) and self.checkpoint
+                    and self.checkpoint.get("latest", {}).get("provider", self.provider) != provider):
+                context = handoff.render(self.checkpoint, self.policy.workspace, refresh=True)
+                prompt = ("[Prior work checkpoint, for reference. Follow the current user request "
+                          "and verify reported results.]\n" + context + "\n\n" + prompt)
             if provider not in self.sessions:
                 prompt = CHAT_NOTE + prompt
             turn = TURNS[provider]()
@@ -834,6 +846,7 @@ class Chat:
                 self.provider, self.tier, self.model = provider, tier, route["model"]
                 if not ok:
                     self.ui.failed(provider, code, "", None)
+                self._checkpoint_turn(provider, said, turn.text(), "completed" if ok else "cancelled")
                 self.remember()
                 self.learn_later()
                 return code
@@ -856,9 +869,32 @@ class Chat:
             self.injected = []
         said += f"\n[lampiran: {', '.join(f.name for f in attachments)}]" if attachments else ""
         self.transcript += [("User", said), ("Assistant", f"[gagal: {turn.error or code}]")]
+        self._checkpoint_turn(provider, said, turn.text(), "failed")
         self.remember()
         self.learn_later()
         return code
+
+    def _checkpoint_turn(self, provider: str, request: str, reply: str, outcome: str):
+        if self.cfg.get("handoff", {}).get("enabled", False):
+            self.checkpoint = handoff.record(self.checkpoint, self.policy.workspace, provider, request, reply, outcome)
+
+    def _handoff_command(self, note: str):
+        if not self.cfg.get("handoff", {}).get("enabled", False):
+            self.ui.info("aktifkan [handoff] enabled = true untuk memakai checkpoint")
+            return
+        if note and not self.transcript:
+            self.ui.info("kirim pesan pertama sebelum menyimpan catatan checkpoint")
+            return
+        if note:
+            self.checkpoint = {
+                **self.checkpoint, "note": note[:2000],
+                "updated": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "git": handoff.workspace_state(self.policy.workspace),
+            }
+        if self.checkpoint:
+            self.ui.info(handoff.render(self.checkpoint, self.policy.workspace, refresh=True))
+        else:
+            self.ui.info("checkpoint belum tersedia")
 
     def _note_reply(self, prompt, reply, provider, model, tier, style, cancelled):
         try:
@@ -921,11 +957,15 @@ class Chat:
         return self.pinned_model or self.model or "auto"
 
     def snapshot(self) -> dict:
-        return {**{k: getattr(self, k) for k in STATE}, "carry": self.carry}
+        return {**self.persistent_state(), "carry": self.carry}
 
     def restore(self, state: dict):
         if not isinstance(state, dict):
             return
+        if state.get("workspace") and state["workspace"] != str(self.policy.workspace):
+            return
+        checkpoint = state.get("checkpoint")
+        self.checkpoint = checkpoint if isinstance(checkpoint, dict) else {}
         history_id = state.get("history_id")
         self.history_id = history_id if isinstance(history_id, str) and history_id else history.new_id()
         tiers = set(TIERS)
@@ -1079,6 +1119,8 @@ class Chat:
             self.ui.info("percakapan baru")
         elif name == "/history":
             self.history_command(arg)
+        elif name == "/handoff":
+            self._handoff_command(arg)
         elif name == "/model" and arg in TIERS:
             self.pinned_tier = arg
             self.ui.info(f"tier dikunci: {arg}")

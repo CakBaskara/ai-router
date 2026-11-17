@@ -28,7 +28,7 @@ SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 EFFORT_NAMES = {"auto": "Otomatis", "minimal": "Minimal", "low": "Low", "medium": "Medium", "high": "High",
                 "xhigh": "Extra High", "max": "Max", "ultra": "Ultra"}
 PACKAGE = Path(__file__).parent
-MODULES = ("paths", "config", "attach", "security", "approval", "failover", "routing_policy", "optimizer",
+MODULES = ("paths", "config", "attach", "security", "approval", "failover", "handoff", "routing_policy", "optimizer",
            "providers.common", "providers.claude", "providers.codex", "dispatch", "learn", "history",
            "codex", "chat", "tui")
 

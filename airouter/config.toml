@@ -40,6 +40,10 @@ quota_max_age = 180
 reliability_min_samples = 5
 reliability_floor = 0.6
 
+[handoff]
+# Include a local progress checkpoint when a chat moves to a different provider.
+enabled = false
+
 [privacy]
 # Route logs contain only a hash and character count by default. Raw prompts needed by the local teacher are kept
 # in a separate pending queue and removed after they have been learned.

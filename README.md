@@ -71,6 +71,26 @@ Only one screen is attached at a time. The session needs Windows 10 1809 or late
 PC restarts; saved conversations remain in `/history`. Problems starting it are written to `session.log` in the
 runtime logs directory.
 
+## Continue a chat with another provider
+
+Type `/claude` or `/codex` in the same chat. The receiving provider gets the recent conversation
+it hasn't seen. Enable a local progress checkpoint in the user configuration for longer tasks:
+
+```toml
+[handoff]
+enabled = true
+```
+
+The checkpoint is saved with chat history for the current workspace. It includes the last completed
+request and a bounded excerpt of its reply, the latest failed or cancelled request when applicable,
+and Git branch, commit, and status. Use `/handoff` to inspect it or `/handoff <note>` to save
+decisions, evidence paths, and next steps. The router refreshes Git metadata and includes the
+checkpoint in the next prompt when the receiving provider differs from the previous attempt.
+
+Checkpoint content is sent to the receiving provider along with the existing recap. Notes are stored with chat history and follow its retention and deletion rules. New chats start with an empty checkpoint. The checkpoint
+records progress at the end of a turn and flags failed or cancelled work for verification before
+retrying. It is not a copy of provider-owned sessions, tool output, or file contents.
+
 ## How it decides
 
 1. Keywords first. "kenapa", "refactor" mean heavy; "bug", "fix" mean medium; "apa itu"

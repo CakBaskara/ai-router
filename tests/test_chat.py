@@ -738,3 +738,30 @@ def test_full_access_in_session_zero_keeps_codex(monkeypatch):
     c = Chat(CFG, use_llm=False)
     c.command("/codex")
     assert c.order("heavy") == ["codex"] and not c.order_note
+
+def test_handoff_survives_history_restore_and_failed_provider_turn(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    c = chat()
+    c.cfg = {**c.cfg, "handoff": {"enabled": True}}
+    run, _ = fake_runner([(0, claude_reply("Baseline passed")), (1, [])])
+    assert c.send("Run baseline", runner=run) == 0
+    c.command("/handoff Inspect the build log before retrying")
+    assert c.send("Build second image", runner=run) == 1
+
+    resumed = chat()
+    resumed.cfg = c.cfg
+    assert resumed.load_history(c.history_id)
+    resumed.command("/codex")
+    run, calls = fake_runner([(0, codex_reply("Ready")), (0, codex_reply("Done"))])
+    assert resumed.send("Continue", runner=run) == 0
+    prompt = calls[0][1]
+    assert "Baseline passed" in prompt
+    assert "Build second image" in prompt and "Verify what happened before retrying" in prompt
+    assert "Inspect the build log before retrying" in prompt
+    assert resumed.send("Next", runner=run) == 0
+    assert "Prior work checkpoint" not in calls[1][1]
+
+    other = tmp_path / "other-worktree"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    assert not chat().load_history(c.history_id)

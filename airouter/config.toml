@@ -44,6 +44,16 @@ reliability_floor = 0.6
 # Include a local progress checkpoint when a chat moves to a different provider.
 enabled = false
 
+[headroom]
+# When true, sela starts a local Headroom proxy and sends the listed providers through it.
+# The proxy reads every routed request in plain text; set enabled = false to call the providers directly.
+enabled = false
+providers = ["claude", "codex"]
+url = "http://127.0.0.1:8787"
+# Install, check daily for a GitHub release, and switch to it only after a test proxy answers every provider above.
+# Setting binary = "<path to headroom.exe>" uses that install as is and turns updating off.
+auto_update = true
+
 [privacy]
 # Route logs contain only a hash and character count by default. Raw prompts needed by the local teacher are kept
 # in a separate pending queue and removed after they have been learned.
@@ -57,6 +67,8 @@ dirs = []
 # false: show a loading line while the model works and only its final answer when it is done;
 # true: stream tool calls and text as they happen.
 show_work = false
+# Over SSH, the 📎 button serves an upload page on this port so files can be picked on the phone.
+upload_port = 8765
 
 # Shown by /models and Ctrl+O, listed first. Codex adds `codex debug models`; Claude Code has no way to list
 # models, so its list is kept here.

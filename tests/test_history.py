@@ -44,9 +44,28 @@ def test_history_ignores_corrupt_content_and_invalid_rows():
     target.write_text("bukan json", encoding="utf-8")
     assert history.entries() == []
     assert history.save(_state())
+    kept = list(target.parent.glob("history.json.corrupt-*"))
+    assert len(kept) == 1 and kept[0].read_text(encoding="utf-8") == "bukan json"
     target.write_text(json.dumps([None, {"id": 2}, {"id": "ok", "state": []}]), encoding="utf-8")
     assert [row["id"] for row in history.entries()] == ["ok"]
     assert history.load("ok") is None
+
+
+def test_history_unreadable_file_is_not_overwritten(monkeypatch):
+    assert history.save(_state("old"))
+    before = history.path().read_bytes()
+    real = type(history.path()).read_text
+
+    def locked(self, *args, **kwargs):
+        if self.name == "history.json":
+            raise PermissionError("file in use")
+        return real(self, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(type(history.path()), "read_text", locked)
+        assert not history.save(_state("new"))
+        assert history.delete(["old"]) == 0
+    assert history.path().read_bytes() == before
 
 
 def test_history_keeps_only_the_newest_items(monkeypatch):

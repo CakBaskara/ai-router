@@ -20,7 +20,7 @@ from textual.theme import Theme
 from textual.widget import Widget
 from textual.widgets import Button, DirectoryTree, Markdown, Static, TextArea, Tree
 
-from . import attach, config, dispatch, learn
+from . import attach, config, dispatch, headroom, learn, upload
 from .chat import HELP, Chat
 
 PICKER_ORDER = ("codex", "claude")
@@ -28,7 +28,7 @@ SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 EFFORT_NAMES = {"auto": "Otomatis", "minimal": "Minimal", "low": "Low", "medium": "Medium", "high": "High",
                 "xhigh": "Extra High", "max": "Max", "ultra": "Ultra"}
 PACKAGE = Path(__file__).parent
-MODULES = ("paths", "config", "attach", "security", "approval", "failover", "handoff", "routing_policy", "optimizer",
+MODULES = ("paths", "config", "attach", "upload", "security", "approval", "failover", "handoff", "routing_policy", "optimizer",
            "providers.common", "providers.claude", "providers.codex", "dispatch", "learn", "history",
            "codex", "chat", "tui")
 
@@ -154,6 +154,13 @@ FilePicker { align: center middle; background: #000000 50%; }
 #file-actions { height: 3; }
 #file-up, #file-close { width: 1fr; height: 3; color: #D4D4D4; text-style: bold; content-align: center middle; }
 #file-up:hover, #file-close:hover { color: #FFFFFF; background: #2B2B2B; }
+#upload-popup { width: 64; max-width: 96%; height: auto; border: round #454545; background: #202020; padding: 0 2; }
+#upload-url { color: #4DAAFC; text-style: bold; margin: 0 0 1 0; }
+#upload-note { color: #9D9D9D; }
+#upload-count { color: #7EE787; margin-top: 1; }
+#upload-actions { height: 1; margin-top: 1; }
+#upload-pc, #upload-close { width: auto; color: #CCCCCC; padding: 0 2 0 0; }
+#upload-pc:hover, #upload-close:hover { color: #FFFFFF; background: #2B2B2B; }
 #quota-popup { width: 54; height: auto; margin: 3 2 0 0; border: round #454545; background: #202020; padding: 1 2; }
 #quota-title { color: #CCCCCC; text-style: bold; }
 #quota-details { color: #CCCCCC; margin-top: 1; }
@@ -720,6 +727,40 @@ class FilePicker(PopupScreen):
         self.dismiss(Path(event.path))
 
 
+class UploadPcButton(Static):
+    def on_click(self):
+        self.screen.dismiss("pc")
+
+
+class UploadPopup(PopupScreen):
+    BINDINGS = [Binding("escape", "close", "Tutup")]
+
+    def __init__(self, url: str):
+        super().__init__()
+        self.url = url
+        self.count = 0
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="upload-popup"):
+            yield Static("Lampirkan dari HP", id="picker-title")
+            yield Static(self.url, id="upload-url", markup=False)
+            yield Static("Buka link ini di browser HP lalu pilih file. File yang masuk langsung terlampir.",
+                         id="upload-note")
+            yield Static("", id="upload-count")
+            with Horizontal(id="upload-actions"):
+                yield UploadPcButton("▤ Pilih dari PC", id="upload-pc")
+                yield FileCloseButton("✕ Tutup", id="upload-close")
+            yield Static("Esc tutup", id="picker-hint")
+
+    def received(self, name: str):
+        self.count += 1
+        if self.is_mounted:
+            self.query_one("#upload-count", Static).update(f"✓ {self.count} file masuk · terakhir {name}")
+
+    def action_close(self):
+        self.dismiss(None)
+
+
 class QuotaPopup(PopupScreen):
     BINDINGS = [Binding("escape", "close", "Tutup")]
 
@@ -861,6 +902,7 @@ class ChatApp(App):
         self.queue = []
         self.attachments = list(carry.get("attachments", []))
         self.picking = False
+        self.uploader = None
         self.stamp = _stamp()
 
     def compose(self) -> ComposeResult:
@@ -906,6 +948,8 @@ class ChatApp(App):
         else:
             self.add_info(f"Keamanan {self.chat.policy.mode.value}. "
                           "Ctrl+O pilih model dan effort · Ctrl+H riwayat · Esc hentikan jawaban · /help perintah")
+        for note in headroom.take_notices():
+            self.add_info(note)
         self.query_one("#log", VerticalScroll).anchor()
         self.refresh_status()
         composer = self.query_one(Composer)
@@ -929,6 +973,8 @@ class ChatApp(App):
         self.set_interval(0.1, self.refresh_sticky)
 
     def on_unmount(self):
+        if self.uploader:
+            self.uploader.close()
         self.chat.close()
 
     @property
@@ -1147,7 +1193,45 @@ class ChatApp(App):
         if attach.has_desktop_dialog():
             self.pick_native()
         else:
+            self.open_upload()
+
+    def open_upload(self):
+        if isinstance(self.screen, UploadPopup):
+            return
+        if self.uploader is None:
+            port = int(self.chat.cfg.get("chat", {}).get("upload_port", 0))
+            for candidate in dict.fromkeys((port, 0)):
+                try:
+                    self.uploader = upload.Server(lambda path: self.call_from_thread(self.attach_uploaded, path),
+                                                  port=candidate,
+                                                  on_done=lambda text: self.call_from_thread(self.upload_done, text))
+                    break
+                except OSError:
+                    continue
+        if self.uploader is None:
+            self.notify("Halaman upload tidak bisa dibuka; pakai pemilih file PC.", severity="warning")
             self.open_file_picker()
+            return
+        self.push_screen(UploadPopup(self.uploader.url), self.upload_closed)
+
+    def upload_closed(self, choice):
+        if choice == "pc":
+            self.open_file_picker()
+
+    def upload_done(self, text: str):
+        if isinstance(self.screen, UploadPopup):
+            self.screen.dismiss(None)
+        if text.strip() or self.attachments:
+            self.submitted(Composer.Submitted(text))
+
+    def attach_uploaded(self, path: Path):
+        self.attachments.append(path)
+        self.refresh_files()
+        name = attach.describe([path])
+        if isinstance(self.screen, UploadPopup):
+            self.screen.received(name.removeprefix("📎 "))
+        else:
+            self.notify(f"Terlampir dari HP: {name}")
 
     def open_file_picker(self):
         if not isinstance(self.screen, FilePicker):

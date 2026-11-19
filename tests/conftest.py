@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from airouter import config, dispatch, learn, paths
+from airouter import config, dispatch, headroom, learn, paths
 
 os.environ["AI_ROUTER_CONFIG"] = str(config.PACKAGE_CONFIG)
 
@@ -20,3 +20,7 @@ def _log_to_tmp(tmp_path, monkeypatch):
     monkeypatch.setattr(dispatch, "read_claude_usage", lambda timeout=15: {})
     monkeypatch.setattr(learn, "teach_due", lambda cfg: False)
     monkeypatch.setattr(learn, "warm_encoder", lambda info=None: None)
+    monkeypatch.setattr(headroom, "settings", lambda: {})
+    monkeypatch.setattr(headroom, "_routed", set())
+    monkeypatch.delenv(headroom.CODEX_ENV, raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)

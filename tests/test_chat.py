@@ -689,14 +689,14 @@ def _low_quota(monkeypatch, provider):
     monkeypatch.setattr(config, "load_quota", lambda: {provider: {"at": now, "5h": {"used": 90}}})
 
 
-def test_pinned_provider_moves_aside_when_its_quota_is_at_the_reserve(monkeypatch):
+def test_pinned_provider_stays_first_when_its_quota_is_at_the_reserve(monkeypatch):
     from airouter import session
     monkeypatch.setattr(session, "non_interactive", lambda: False)
     _low_quota(monkeypatch, "codex")
     c = Chat(CFG, use_llm=False)
     c.command("/codex")
-    assert c.order("heavy") == ["claude", "codex"]
-    assert "codex" in c.order_note and "claude" in c.order_note
+    assert c.order("heavy") == ["codex", "claude"]
+    assert "codex" in c.order_note and "manual" in c.order_note and "claude" in c.order_note
 
 
 def test_pinned_provider_stays_when_every_provider_is_low(monkeypatch):
@@ -707,6 +707,16 @@ def test_pinned_provider_stays_when_every_provider_is_low(monkeypatch):
     c = Chat(CFG, use_llm=False)
     c.command("/codex")
     assert c.order("heavy") == ["codex"]
+    assert "manual" in c.order_note
+
+
+def test_pinned_provider_keeps_single_route_when_quota_is_fine(monkeypatch):
+    from airouter import session
+    monkeypatch.setattr(session, "non_interactive", lambda: False)
+    monkeypatch.setattr(config, "load_quota", lambda: {})
+    c = Chat(CFG, use_llm=False)
+    c.command("/claude")
+    assert c.order("heavy") == ["claude"] and not c.order_note
 
 
 def test_strict_mode_in_session_zero_sends_codex_turns_to_claude(monkeypatch):

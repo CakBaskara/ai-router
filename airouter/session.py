@@ -19,6 +19,8 @@ from . import paths
 PIPE_PREFIX = "\\\\.\\pipe\\"
 MOVED = "Sesi dipindah ke perangkat lain. Ketik sela untuk masuk lagi."
 STOPPED = "Sesi latar berhenti."
+STALE = ("Sesi latar masih memakai kode lama. Ketik /exit di sela lalu jalankan sela lagi untuk memakai kode baru.\n"
+         "Tekan Enter untuk lanjut ke sesi lama.")
 DROP = (b"\x1b[?9001h", b"\x1b[?9001l")
 RESET = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b[?1004l\x1b[?25h\x1b[?1049l"
 BREAKAWAY_FROM_JOB = 0x01000000
@@ -40,6 +42,15 @@ def non_interactive() -> bool:
     if not ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(sid)):
         return False
     return sid.value == 0
+
+
+def code_version() -> str:
+    digest = hashlib.sha256()
+    package = Path(__file__).parent
+    for path in sorted(package.rglob("*.py")):
+        digest.update(path.relative_to(package).as_posix().encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()[:12]
 
 
 def address() -> str:
@@ -97,6 +108,7 @@ class Host:
         self.listener = Listener(addr or address(), family="AF_PIPE", authkey=self.key)
         self.lock = threading.Lock()
         self.conn = None
+        self.version = code_version()
         self.pty = Pty(cmdline, cols, rows, self._output, cwd)
 
     def _send(self, conn, message) -> bool:
@@ -113,6 +125,7 @@ class Host:
 
     def _attach(self, conn):
         with self.lock:
+            self._send(conn, ("ver", self.version))
             old, self.conn = self.conn, conn
             if old is not None:
                 self._send(old, ("bye", MOVED))
@@ -301,7 +314,30 @@ class Console:
                 send(("in", data))
 
 
+def _check_version(conn) -> list:
+    early, version = [], None
+    if conn.poll(2):
+        message = conn.recv()
+        if message[0] == "ver":
+            version = message[1]
+        else:
+            early.append(message)
+    if version != code_version():
+        print(STALE)
+        try:
+            input()
+        except EOFError:
+            pass
+    return early
+
+
 def attach(conn) -> int:
+    try:
+        early = _check_version(conn)
+    except (EOFError, OSError):
+        conn.close()
+        print(STOPPED)
+        return 0
     console = Console()
     lock = threading.Lock()
 
@@ -315,7 +351,7 @@ def attach(conn) -> int:
         send(("size", *console.size()))
         threading.Thread(target=_pump, args=(console, send), daemon=True).start()
         while True:
-            kind, payload = conn.recv()
+            kind, payload = early.pop(0) if early else conn.recv()
             if kind == "out":
                 console.write(payload)
             elif kind == "bye":

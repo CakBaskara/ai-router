@@ -6,7 +6,7 @@ import sys
 import time
 from datetime import datetime
 
-from . import __version__, chat, config, dispatch, evaluation, learn, optimizer, paths
+from . import __version__, chat, config, dispatch, evaluation, headroom, learn, optimizer, paths
 from .config import log, say, usage_today
 from .learn import TIERS, classify
 from .security import SecurityPolicy
@@ -37,6 +37,9 @@ def _parse(argv):
     p.add_argument("--migrate-from", type=str, help="legacy logs directory (requires --migrate-data)")
     p.add_argument("--apply", action="store_true", help="copy data after previewing --migrate-data; never overwrite")
     p.add_argument("--no-host", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--headroom-update", action="store_true",
+                   help="install or update Headroom on this device after checking the new release")
+    p.add_argument("--headroom-auto", action="store_true", help=argparse.SUPPRESS)
     args = p.parse_args(argv)
     if (args.apply or args.migrate_from) and not args.migrate_data:
         p.error("--apply and --migrate-from require --migrate-data")
@@ -119,6 +122,9 @@ def main(argv=None) -> int:
         else:
             print("Migrasi selesai. File sumber tetap ada sebagai cadangan.")
         return 1 if failed else 0
+    if args.headroom_update or args.headroom_auto:
+        return 0 if headroom.update(say=print, force=args.headroom_update) else 1
+    headroom.apply()
     cfg = config.load()
     policy = SecurityPolicy.from_config(cfg)
 

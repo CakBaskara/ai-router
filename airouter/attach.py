@@ -44,6 +44,20 @@ def store(src: Path) -> Path:
     return dest
 
 
+def save_bytes(name: str, data: bytes) -> Path:
+    if len(data) > MAX_BYTES:
+        raise ValueError(f"{name} lebih dari 20 MB")
+    if Path(name).suffix.lower() in CONVERT:
+        import io
+        from PIL import Image
+        dest = _target(Path(name).stem + ".png")
+        Image.open(io.BytesIO(data)).save(dest)
+        return dest
+    dest = _target(name)
+    dest.write_bytes(data)
+    return dest
+
+
 def from_clipboard() -> list[Path]:
     from PIL import ImageGrab
     data = ImageGrab.grabclipboard()

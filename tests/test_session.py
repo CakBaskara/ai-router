@@ -30,6 +30,8 @@ def read_until(conn, marker: bytes, timeout=10.0):
     while time.monotonic() < deadline:
         if conn.poll(0.1):
             kind, payload = conn.recv()
+            if kind == "ver":
+                continue
             if kind == "bye":
                 return seen, payload
             seen += payload
@@ -148,3 +150,28 @@ def test_cli_chat_goes_through_session_unless_no_host(monkeypatch, tty):
     seen.clear()
     assert cli.main(["--no-host"]) == 0
     assert seen == [("tui",)]
+
+
+def test_host_tells_its_code_version_first(tmp_path):
+    host, thread, addr = start_host(tmp_path)
+    conn = session.connect(addr, KEY)
+    assert conn.recv() == ("ver", session.code_version())
+    conn.close()
+    host.pty.close()
+
+
+@pytest.mark.parametrize("first, warned", [(("ver", None), False), (("ver", "lama"), True), (("out", b"x"), True)])
+def test_attach_warns_when_the_host_runs_other_code(monkeypatch, capsys, first, warned):
+    first = (first[0], session.code_version()) if first == ("ver", None) else first
+    monkeypatch.setattr("builtins.input", lambda: "")
+
+    class Conn:
+        def poll(self, timeout):
+            return True
+
+        def recv(self):
+            return first
+
+    early = session._check_version(Conn())
+    assert (session.STALE in capsys.readouterr().out) is warned
+    assert early == ([] if first[0] == "ver" else [first])

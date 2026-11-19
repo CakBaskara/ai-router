@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import approval, attach, config, dispatch, failover, handoff, history, learn, optimizer, session
+from . import approval, attach, config, dispatch, failover, handoff, headroom, history, learn, optimizer, session
 from .dispatch import CodexProc
 from .config import log, say, usage_today
 from .learn import TIERS, classify
@@ -618,11 +618,12 @@ class Chat:
         self.order_note = ""
         if self.pinned_provider:
             spare = next((p for p in providers if p != self.pinned_provider and p not in low), None)
-            if self.pinned_provider in low and spare:
-                providers = [spare, self.pinned_provider]
-                self.order_note = f"kuota {self.pinned_provider} tinggal ≤ cadangan; pesan ini ke {spare}"
-            else:
-                providers = [self.pinned_provider]
+            providers = [self.pinned_provider]
+            if self.pinned_provider in low:
+                self.order_note = f"kuota {self.pinned_provider} tinggal ≤ cadangan; tetap dipakai karena dipilih manual"
+                if spare:
+                    providers.append(spare)
+                    self.order_note += f"; bila ditolak, pindah ke {spare}"
         if (providers[0] == "codex" and self.policy.mode is not Mode.FULL_ACCESS
                 and session.non_interactive()):
             others = [c.provider for c in ranked if c.provider != "codex"]
@@ -722,6 +723,8 @@ class Chat:
         prompt = with_files(provider, prompt, files)
         show = show or self.ui.show
         policy = self.execution_policy()
+        if headroom.ensure(self.ui.info):
+            self._close_providers()
         if runner or provider not in ("claude", "codex"):
             cmd = dispatch.chat_cmd(provider, route["model"], route["effort"], self.sessions.get(provider),
                                     files, policy=policy)

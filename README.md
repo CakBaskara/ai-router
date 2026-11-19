@@ -45,7 +45,8 @@ py -m pip install -e .
 In the chat, Enter sends, Shift+Enter adds a line, Esc or ■ stops an answer, and Ctrl+O picks a
 model and effort in one panel: ↑/↓ and Enter pick the model, ←/→ or a click on the slider set the effort,
 and the panel stays open until Esc. Ctrl+E and clicking the model chip open the same panel; `/effort high` and
-`/effort auto` work too. A pinned effort is fitted to the levels each model supports. Alt+V pastes a screenshot, and 📎 attaches a file. A pasted or dragged file path stays
+`/effort auto` work too. A pinned effort is fitted to the levels each model supports. Alt+V pastes a screenshot, and 📎 attaches a file. Over SSH, 📎 shows a link instead; open it in the phone's browser to pick files there (port
+`chat.upload_port`, default 8765; anyone with the link on that network can upload until sela closes). A pasted or dragged file path stays
 plain text. The ⟲ button, Ctrl+H, or `/history` opens the last 100 saved conversations; provider sessions and routing choices
 are restored when a conversation is continued. `/history hapus 2 3` deletes saved conversations by number and
 `/history hapus semua` deletes all of them. Type `/help` for the rest.
@@ -66,6 +67,8 @@ Started over SSH (for example from Termius), `sela` runs the chat in a backgroun
 or minimizing the SSH app does not stop it. Type `sela` again over SSH to get the same screen back. Typing `sela`
 on the PC while that session is alive opens the same session there, and the phone is told it moved. `/exit`
 ends the background session. Without a live session, `sela` on the PC runs as a normal window.
+If the session was started before the code changed, `sela` says so before attaching; `/exit` and start
+it again to load the new code.
 
 Only one screen is attached at a time. The session needs Windows 10 1809 or later (ConPTY) and is lost when the
 PC restarts; saved conversations remain in `/history`. Problems starting it are written to `session.log` in the
@@ -133,6 +136,21 @@ answers and kept only if it scores better; otherwise the old one comes back. The
   attachment directories are not writable roots. Restart sessions after changing security settings.
 - Settings use the bundled `airouter/config.toml` as defaults, with user settings overlaid as described below.
 
+## Headroom proxy
+
+With `[headroom] enabled = true`, sela sends Claude and Codex through a local Headroom proxy that shortens tool
+output before it reaches the provider. It runs in Headroom's default lossy mode, which can drop characters from
+tool output. The proxy sees every request in plain text; telemetry and Headroom's own update check are off.
+
+Each device installs its own copy under the data folder: `sela --headroom-update` installs it now, otherwise the
+first `sela` with Headroom enabled installs it in the background and calls the providers directly until it is ready.
+Once a day sela checks GitHub for a new release, installs it beside the current one and starts a test proxy. The new
+version is used from the next `sela` start only when a short Claude and Codex request both answer through it; a
+release that fails stays unused, is not retried automatically, and the next `sela` start says why. `update.log` in
+the Headroom folder records each check. If the proxy stops during a chat, sela restarts it before the next message
+and calls the providers directly when that fails. Set `binary` to an existing `headroom.exe` to skip installing and
+updating.
+
 ## Security modes
 
 ```toml
@@ -163,7 +181,8 @@ Path validation is defense in depth, not a replacement for the provider sandbox.
 
 Routing can downgrade after a self-contained topic change while short dependent follow-ups retain the previous
 task tier. Fresh quota readings below the configured reserve deprioritize that provider; missing or stale readings
-fall back to the existing usage-count ordering. `--eval-routing` accepts a JSONL holdout, rejects training leakage,
+fall back to the existing usage-count ordering. A manually pinned provider is still tried first when it is below the
+reserve, with a warning; another provider is used only if that attempt fails and a safe retry is allowed. `--eval-routing` accepts a JSONL holdout, rejects training leakage,
 and writes a hashed JSON report beside the runtime logs. A holdout is considered valid only when every label is
 explicitly verified.
 
@@ -176,6 +195,7 @@ Runtime data is stored outside the installed package. On Windows the defaults ar
 | User configuration | `%APPDATA%\AI-Router\config.toml` |
 | Routes, chat history, labels, quota, reply style and learning state | `%LOCALAPPDATA%\AI-Router\logs\` |
 | Attachments | `%LOCALAPPDATA%\AI-Router\attachments\` |
+| Headroom install, proxy data and update state | `%LOCALAPPDATA%\AI-Router\headroom\` |
 | Downloaded embedding models | `%LOCALAPPDATA%\AI-Router\models\` |
 
 Linux and macOS use the corresponding per-user configuration and data directories from `platformdirs`.

@@ -51,14 +51,28 @@ def _process_lock(target: Path):
             handle.close()
 
 
-def _read() -> list[dict]:
+def _read(strict: bool = False) -> list[dict]:
     try:
         rows = json.loads(path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        if not isinstance(rows, list):
+            raise ValueError("history is not a list")
+    except FileNotFoundError:
         return []
-    if not isinstance(rows, list):
+    except (OSError, ValueError):
+        if strict:
+            raise
         return []
     return [row for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)]
+
+
+def _read_for_write(target: Path) -> list[dict]:
+    # An unreadable file aborts the write; rewriting from an empty list would erase every other chat.
+    try:
+        return _read(strict=True)
+    except ValueError:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        target.replace(target.with_name(f"{target.name}.corrupt-{stamp}"))
+        return []
 
 
 def title(transcript: list) -> str:
@@ -95,7 +109,7 @@ def save(state: dict) -> bool:
     with _lock:
         try:
             with _process_lock(target):
-                rows = _read()
+                rows = _read_for_write(target)
                 prior = next((row for row in rows if row.get("id") == history_id), {})
                 row = {
                     "id": history_id,
@@ -131,7 +145,7 @@ def delete(history_ids) -> int:
     with _lock:
         try:
             with _process_lock(target):
-                rows = _read()
+                rows = _read_for_write(target)
                 kept = [row for row in rows if row["id"] not in wanted]
                 if len(kept) != len(rows):
                     _write(kept, target, temporary)

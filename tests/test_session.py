@@ -110,6 +110,81 @@ def test_connect_returns_none_without_a_host():
     assert session.connect(f"{session.PIPE_PREFIX}sela-test-{uuid.uuid4().hex}", KEY) is None
 
 
+def test_slow_ssh_mouse_reports_reach_windows_as_scroll_not_keys(tmp_path):
+    script = '''import threading
+from airouter.tui import _shift_enter_as_newline
+from textual.drivers import win32
+_shift_enter_as_newline()
+win32.enable_application_mode()
+def show(event):
+    print("EVENT:" + type(event).__name__ + ":" + getattr(event, "key", ""), flush=True)
+monitor = win32.EventMonitor(None, None, threading.Event(), show)
+monitor.on_size_change = lambda *args: None
+print("READY", flush=True)
+monitor.run()
+'''
+    host, thread, addr = start_host(tmp_path, script)
+    conn = session.connect(addr, KEY)
+    try:
+        conn.send(("size", 80, 24))
+        read_until(conn, b"READY")
+        seen = b""
+        for button, suffix, name in [
+            (b"64", b"M", b"MouseScrollUp"), (b"65", b"M", b"MouseScrollDown"),
+            (b"0", b"M", b"MouseDown"), (b"32", b"M", b"MouseMove"),
+            (b"0", b"m", b"MouseUp"),
+        ]:
+            conn.send(("in", b"\x1b[<" + button[:1]))
+            time.sleep(0.3)
+            conn.send(("in", button[1:] + b";31;12" + suffix))
+            output, _ = read_until(conn, b"EVENT:" + name)
+            seen += output
+        assert b"EVENT:Key" not in seen
+        conn.send(("in", b"x"))
+        read_until(conn, b"EVENT:Key:x")
+        conn.send(("in", b"\x1b"))
+        read_until(conn, b"EVENT:Key:escape")
+    finally:
+        conn.close()
+        host.pty.close()
+
+
+def test_reattached_terminal_enables_mouse_reporting_again(tmp_path):
+    from airouter.conpty import Pty
+
+    script = "import sys\nprint('\\x1b[?1000h\\x1b[?1003h\\x1b[?1006hREADY', flush=True)\n" + ECHO
+    host, thread, addr = start_host(tmp_path, script)
+    client = "from airouter import session; session.attach(session.connect(" + repr(addr) + "," + repr(KEY) + "))"
+    terminal = None
+
+    def wait_for(chunks, marker):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if marker in b"".join(chunks):
+                return b"".join(chunks)
+            time.sleep(0.02)
+        raise AssertionError(f"{marker!r} tidak muncul; diterima {b''.join(chunks)[-300:]!r}")
+
+    try:
+        for _ in range(2):
+            chunks = []
+            terminal = Pty(subprocess.list2cmdline([sys.executable, "-u", "-c", client]),
+                           80, 24, chunks.append)
+            output = wait_for(chunks, b"READY")
+            assert b"\x1b[?1000h" in output
+            assert b"\x1b[?1003h" in output
+            assert b"\x1b[?1006h" in output
+            terminal.write(b"cek\r")
+            wait_for(chunks, b"ECHO:cek")
+            terminal.close()
+            terminal = None
+            time.sleep(0.1)
+    finally:
+        if terminal is not None:
+            terminal.close()
+        host.pty.close()
+
+
 @pytest.fixture
 def tty(monkeypatch):
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)

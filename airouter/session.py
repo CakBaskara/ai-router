@@ -15,6 +15,7 @@ from multiprocessing.connection import Client, Listener
 from pathlib import Path
 
 from . import paths
+from .terminal import TerminalInputBuffer
 
 PIPE_PREFIX = "\\\\.\\pipe\\"
 MOVED = "Sesi dipindah ke perangkat lain. Ketik sela untuk masuk lagi."
@@ -22,6 +23,7 @@ STOPPED = "Sesi latar berhenti."
 STALE = ("Sesi latar masih memakai kode lama. Ketik /exit di sela lalu jalankan sela lagi untuk memakai kode baru.\n"
          "Tekan Enter untuk lanjut ke sesi lama.")
 DROP = (b"\x1b[?9001h", b"\x1b[?9001l")
+MOUSE_REPORTING = "\x1b[?1000h\x1b[?1003h\x1b[?1006h"
 RESET = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b[?1004l\x1b[?25h\x1b[?1049l"
 BREAKAWAY_FROM_JOB = 0x01000000
 NEW_PROCESS_GROUP = 0x00000200
@@ -135,11 +137,18 @@ class Host:
 
     def _serve(self, conn):
         first = True
+        input_buffer = TerminalInputBuffer()
         try:
             while True:
+                if input_buffer.pending and not conn.poll(0.1):
+                    if data := input_buffer.flush_escape():
+                        self.pty.write(data)
+                    continue
                 kind, *rest = conn.recv()
                 if kind == "in":
-                    self.pty.write(rest[0])
+                    # ConPTY can discard a partial mouse report before Textual receives it.
+                    if data := input_buffer.feed(rest[0]):
+                        self.pty.write(data)
                 elif kind == "size":
                     cols, rows = rest
                     if first:
@@ -254,6 +263,7 @@ class Console:
         self.modes = (self._mode(self.hin), self._mode(self.hout))
         w.KERNEL32.SetConsoleMode(self.hin, w.ENABLE_VIRTUAL_TERMINAL_INPUT | w.ENABLE_WINDOW_INPUT)
         w.KERNEL32.SetConsoleMode(self.hout, self.modes[1] | w.ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+        self.write_text(MOUSE_REPORTING)
 
     def leave(self):
         self.closed.set()

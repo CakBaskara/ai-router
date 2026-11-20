@@ -351,6 +351,30 @@ def test_scroll_buttons_move_the_log():
     asyncio.run(go())
 
 
+def test_scrollbar_drag_moves_the_log_without_typing_into_composer():
+    async def go():
+        app = make_app()
+        async with app.run_test(size=(100, 24)) as pilot:
+            for i in range(60):
+                app.add_info(f"baris {i}")
+            await pilot.pause(0.2)
+            log = app.query_one("#log", VerticalScroll)
+            log.scroll_home(animate=False)
+            await pilot.pause(0.1)
+            scrollbar = log.vertical_scrollbar
+            await pilot.mouse_down(scrollbar, offset=(0, 0))
+            await pilot.pause()
+            assert scrollbar.grabbed is not None
+            await pilot.hover(scrollbar, offset=(0, 5))
+            await pilot.pause(0.2)
+            assert log.scroll_y > 0
+            await pilot.mouse_up(scrollbar, offset=(0, 5))
+            await pilot.pause()
+            assert scrollbar.grabbed is None
+            assert app.query_one(Composer).text == ""
+    asyncio.run(go())
+
+
 def test_long_reply_keeps_running_and_finished_status_visible():
     async def go():
         app = make_app()
